@@ -1,4 +1,4 @@
-name: Build and Deploy
+name: Deploy github pages
 on:
   push:
     branches: [ main ]
@@ -22,10 +22,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build website
-        run: python main.py
+        run: python generate.py
 
       - name: Deploy
-        uses: peaceiris/actions-gh-pages@v3
+        uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./
