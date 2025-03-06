@@ -139,8 +139,10 @@ def generate_html() -> str:
 def main():
     html_content = generate_html()
 
-    with open("index.html", "w", encoding="utf-8") as f:
-        f.write(html_content)
+    public_dir = Path("public")
+    public_dir.mkdir(exist_ok=True)
+    index_html = public_dir / "index.html"
+    index_html.write_text(html_content)
 
 
 if __name__ == "__main__":
