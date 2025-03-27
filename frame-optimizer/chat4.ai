@@ -1,0 +1,2170 @@
+## SYSTEM:
+
+You are a helpful assistant. Be brief, you're talking to an expert.
+
+When you're writing code:
+* If you write Python, use mypy annotations. Use modern syntax, like list[str] instead of List[str] and str | int instead of Union.
+* Make the code readable -- break things into functions that are debuggable and can be easily unit tested.
+* Don't overuse comments, no need to comment every line. Only comment things that are not obvious from reading the code.
+* Don't show me entire code listings unless I ask for it, give me just surgical changes.
+
+In numpy, make a recursive 1D fractal function generator that creates values between 1 and 5 with smoothing.
+
+The non-smooth, non-functional version would be:
+
+
+```python
+split_points = [.3, .7, .5]
+values = [1, 2, 3]
+
+def create_curve(length, depth=0, max_depth=3, i=0):
+    value = values[i % len(values)]
+    split_point = split_points[i % len(values)]
+
+    if depth == max_depth:
+        return torch.tensor(value).repeat(length)
+
+    left = int(length * split_point)
+    right = length - left
+
+    return torch.cat([create_curve(left, depth + 1, max_depth, i + 1), create_curve(right, depth + 1, max_depth, i + 2)])
+```
+
+I want to make that return a smooth, differentiable function that can be applied to arbitrary length.
+
+Here's what I have so far:
+
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/simple.py</ai-context>
+
+## USER:
+
+
+Add an argmax path (rather than softmax) for inference
+
+## ASSISTANT:
+
+Here's the addition of an argmax path for inference. This allows the model to use a deterministic path during inference, which can be helpful for performance and consistency:
+
+```python
+def generate_fractal_function(
+    split_points: list[float],
+    values: list[float],
+    left_children_matrix: torch.Tensor,   # Shape [len(values), len(values)]
+    right_children_matrix: torch.Tensor,  # Shape [len(values), len(values)]
+    max_depth: int = 3,
+    smoothing_width: float = 0.1,
+    use_argmax: bool = False,  # Use argmax instead of softmax for inference
+) -> FractalFunction:
+    """
+    Creates a fractal function through differentiable function composition.
+
+    Args:
+        split_points: List of split points (0-1) for each segment
+        values: Base values for each segment
+        left_children_matrix: Matrix of child logits for left branches [len(values), len(values)]
+        right_children_matrix: Matrix of child logits for right branches [len(values), len(values)]
+        max_depth: Maximum recursion depth
+        smoothing_width: Width of the smoothing transition (0-1)
+        use_argmax: If True, uses deterministic argmax path instead of probabilistic softmax
+
+    Returns:
+        A composable differentiable function object
+    """
+    if use_argmax:
+        # Argmax path - use indices directly
+        left_indices = torch.argmax(left_children_matrix, dim=1)
+        right_indices = torch.argmax(right_children_matrix, dim=1)
+
+        # Don't need probabilities since we're just following single best path
+        left_children_probs = None
+        right_children_probs = None
+    else:
+        # Softmax path - use probability distributions
+        left_children_probs = torch.nn.functional.softmax(left_children_matrix, dim=1)
+        right_children_probs = torch.nn.functional.softmax(right_children_matrix, dim=1)
+
+    # Function cache to prevent exponential explosion
+    function_cache = {}
+
+    def build_function(
+        depth: int,
+        start: float,
+        end: float,
+        parent_idx: int,
+    ) -> FractalFunction:
+        """Recursively build the fractal function for range [start, end]"""
+        # Use memoization to avoid exponential explosion
+        cache_key = (depth, start, end, parent_idx)
+        if cache_key in function_cache:
+            return function_cache[cache_key]
+
+        value = values[parent_idx]
+
+        # Base case - maximum depth reached
+        if depth == max_depth:
+            result = ConstantFunction(value)
+            function_cache[cache_key] = result
+            return result
+
+        # Calculate split position in absolute coordinates
+        split = split_points[parent_idx % len(split_points)]
+        mid = start + split * (end - start)
+
+        # Create transition function with width that scales with segment size
+        segment_size = end - start
+        trans_width = smoothing_width * segment_size
+        transition = SigmoidFunction(mid, trans_width)
+
+        if use_argmax:
+            # Simply use the best child for each branch
+            left_child_idx = left_indices[parent_idx].item()
+            right_child_idx = right_indices[parent_idx].item()
+
+            left_func = build_function(depth + 1, start, mid, left_child_idx)
+            right_func = build_function(depth + 1, mid, end, right_child_idx)
+        else:
+            # Get LEFT branch probabilities for this parent
+            left_probs = left_children_probs[parent_idx]
+
+            # Create weighted left branch (blend of all possible children)
+            left_branches = []
+            for i, prob in enumerate(left_probs):
+                if prob > 1e-5:  # Skip negligible contributions
+                    child_func = build_function(depth + 1, start, mid, i)
+                    left_branches.append((prob, child_func))
+
+            # Get RIGHT branch probabilities for this parent
+            right_probs = right_children_probs[parent_idx]
+
+            # Create weighted right branch (blend of all possible children)
+            right_branches = []
+            for i, prob in enumerate(right_probs):
+                if prob > 1e-5:  # Skip negligible contributions
+                    child_func = build_function(depth + 1, mid, end, i)
+                    right_branches.append((prob, child_func))
+
+            # Combine left branches with weighted blending
+            if not left_branches:
+                left_func = ConstantFunction(values[0])
+            else:
+                # Sort by weight descending to blend most significant first
+                left_branches.sort(key=lambda x: x[0], reverse=True)
+                left_func = left_branches[0][1]
+                total_weight = left_branches[0][0]
+
+                # Incrementally blend the functions with proper weighting
+                for weight, func in left_branches[1:]:
+                    # Calculate relative weight for this blend
+                    blend_weight = weight / (total_weight + weight)
+                    weight_func = ConstantFunction(blend_weight)
+                    left_func = BlendedFunction(left_func, func, weight_func, depth)
+                    total_weight = total_weight + weight
+
+            # Repeat for right branches
+            if not right_branches:
+                right_func = ConstantFunction(values[0])
+            else:
+                right_branches.sort(key=lambda x: x[0], reverse=True)
+                right_func = right_branches[0][1]
+                total_weight = right_branches[0][0]
+
+                for weight, func in right_branches[1:]:
+                    blend_weight = weight / (total_weight + weight)
+                    weight_func = ConstantFunction(blend_weight)
+                    right_func = BlendedFunction(right_func, func, weight_func, depth)
+                    total_weight = total_weight + weight
+
+        # Create final blended function
+        result = BlendedFunction(left_func, right_func, transition, depth)
+        function_cache[cache_key] = result
+        return result
+
+    # Create the full function with domain restriction
+    fractal_func = build_function(depth=0, start=0.0, end=1.0, parent_idx=0)
+
+    # Create wrapper with domain restriction
+    class DomainRestrictedFractal(FractalFunction):
+        def __init__(self, func: FractalFunction):
+            self.func = func
+            # Store parameters to allow gradient flow
+            self.left_children_matrix = left_children_matrix
+            self.right_children_matrix = right_children_matrix
+            self.split_points = split_points
+            self.values = values
+            self.use_argmax = use_argmax
+
+        def __call__(self, x: torch.Tensor) -> torch.Tensor:
+            x_clipped = torch.clamp(x, 0.0, 1.0)
+            return self.func(x_clipped)
+
+        def __repr__(self) -> str:
+            return f"f(x) = {self.func}"
+
+    return DomainRestrictedFractal(fractal_func)
+```
+
+You can now use this function with `use_argmax=True` during inference to get faster, deterministic results by following only the best paths through the fractal tree.
+
+Example usage:
+```python
+# During training - use softmax for differentiability
+train_func = generate_fractal_function(
+    left_children_matrix=left_children_matrix,
+    right_children_matrix=right_children_matrix,
+    split_points=split_points,
+    values=values,
+    max_depth=max_depth,
+    smoothing_width=0.15
+)
+
+# During inference - use argmax for speed and determinism
+infer_func = generate_fractal_function(
+    left_children_matrix=left_children_matrix,
+    right_children_matrix=right_children_matrix,
+    split_points=split_points,
+    values=values,
+    max_depth=max_depth,
+    smoothing_width=0.15,
+    use_argmax=True
+)
+```
+
+## USER:
+
+Now make a torch optimization loop that tries to approximate a given complex curve by optimizing left_children_matrix, right_children_matrix, split_points and values
+
+## ASSISTANT:
+
+Here's a torch optimization loop that approximates a target curve by optimizing the fractal function parameters:
+
+```python
+def optimize_fractal_function(
+    target_function: callable,
+    num_points: int = 1000,
+    num_values: int = 3,
+    max_depth: int = 4,
+    num_iterations: int = 2000,
+    learning_rate: float = 0.01,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    smoothing_width: float = 0.1,
+    show_progress: bool = True,
+) -> tuple[FractalFunction, dict]:
+    """
+    Optimize a fractal function to approximate a target function.
+
+    Args:
+        target_function: Function to approximate (takes tensor x in [0,1] range, returns y values)
+        num_points: Number of evaluation points for loss calculation
+        num_values: Number of base values to optimize
+        max_depth: Maximum recursion depth for fractal
+        num_iterations: Number of optimization iterations
+        learning_rate: Learning rate for Adam optimizer
+        device: Device to run optimization on
+        smoothing_width: Smoothing width for transitions
+        show_progress: Whether to print progress updates
+
+    Returns:
+        Tuple of (optimized fractal function, optimization history)
+    """
+    # Create learnable parameters
+    split_points_param = torch.nn.Parameter(
+        torch.rand(num_values, device=device) * 0.5 + 0.25  # Initialize in [0.25, 0.75]
+    )
+    values_param = torch.nn.Parameter(
+        torch.rand(num_values, device=device) * 4.0 + 1.0  # Initialize in [1, 5]
+    )
+    left_matrix = torch.nn.Parameter(
+        torch.randn(num_values, num_values, device=device) * 0.1
+    )
+    right_matrix = torch.nn.Parameter(
+        torch.randn(num_values, num_values, device=device) * 0.1
+    )
+
+    # Optimizer
+    optimizer = torch.optim.Adam(
+        [split_points_param, values_param, left_matrix, right_matrix],
+        lr=learning_rate
+    )
+
+    # Create evaluation points
+    x = torch.linspace(0, 1, num_points, device=device)
+    target_y = target_function(x)
+
+    # Normalization for target - rescale to [1, 5] range if needed
+    target_min = target_y.min()
+    target_max = target_y.max()
+    if target_min < 1.0 or target_max > 5.0:
+        target_y = (target_y - target_min) * (4.0 / (target_max - target_min)) + 1.0
+
+    # Track history
+    history = {
+        "loss": [],
+        "split_points": [],
+        "values": [],
+        "predicted_y": []
+    }
+
+    # Optimization loop
+    best_loss = float('inf')
+    best_state = None
+
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+
+        # Apply constraints to parameters
+        split_points = torch.sigmoid(split_points_param) * 0.8 + 0.1  # Constrain to [0.1, 0.9]
+        values = torch.clamp(values_param, 1.0, 5.0)
+
+        # Create fractal function
+        fractal_func = generate_fractal_function(
+            split_points=split_points.tolist(),
+            values=values.tolist(),
+            left_children_matrix=left_matrix,
+            right_children_matrix=right_matrix,
+            max_depth=max_depth,
+            smoothing_width=smoothing_width,
+            use_argmax=False  # Use softmax during training
+        )
+
+        # Evaluate function
+        predicted_y = fractal_func(x)
+
+        # Calculate loss (MSE)
+        loss = torch.nn.functional.mse_loss(predicted_y, target_y)
+
+        # Add regularization to encourage diversity in values
+        value_diversity_loss = -torch.std(values) * 0.01
+        total_loss = loss + value_diversity_loss
+
+        # Backward and optimize
+        total_loss.backward()
+        optimizer.step()
+
+        # Save history
+        history["loss"].append(loss.item())
+        history["split_points"].append(split_points.detach().cpu().numpy())
+        history["values"].append(values.detach().cpu().numpy())
+
+        if i % 100 == 0 and show_progress:
+            print(f"Iteration {i}/{num_iterations}, Loss: {loss.item():.6f}")
+            history["predicted_y"].append(predicted_y.detach().cpu().numpy())
+
+        # Save best state
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_state = {
+                "split_points": split_points.detach().clone(),
+                "values": values.detach().clone(),
+                "left_matrix": left_matrix.detach().clone(),
+                "right_matrix": right_matrix.detach().clone(),
+            }
+
+    # Create final function using best parameters
+    final_func = generate_fractal_function(
+        split_points=best_state["split_points"].tolist(),
+        values=best_state["values"].tolist(),
+        left_children_matrix=best_state["left_matrix"],
+        right_children_matrix=best_state["right_matrix"],
+        max_depth=max_depth,
+        smoothing_width=smoothing_width,
+        use_argmax=True  # Use argmax for final model
+    )
+
+    # Final evaluation for visualization
+    with torch.no_grad():
+        final_y = final_func(x)
+        history["final_y"] = final_y.cpu().numpy()
+        history["x"] = x.cpu().numpy()
+        history["target_y"] = target_y.cpu().numpy()
+
+    # Return optimized function and history
+    return final_func, history
+
+
+def plot_optimization_results(history: dict, show_iterations: list[int] = None):
+    """Plot the optimization results"""
+    import matplotlib.pyplot as plt
+
+    # Create figure
+    fig, axs = plt.subplots(2, 1, figsize=(10, 10))
+
+    # Plot loss
+    axs[0].plot(history["loss"])
+    axs[0].set_title("Loss over iterations")
+    axs[0].set_xlabel("Iteration")
+    axs[0].set_ylabel("MSE Loss")
+    axs[0].grid(True)
+
+    # Plot final result
+    axs[1].plot(history["x"], history["target_y"], label="Target", color="black")
+    axs[1].plot(history["x"], history["final_y"], label="Optimized Fractal", color="red", alpha=0.8)
+
+    # Show intermediate results if requested
+    if show_iterations:
+        iterations = sorted(i for i in show_iterations if i < len(history["predicted_y"]))
+        for i, iter_idx in enumerate(iterations):
+            axs[1].plot(
+                history["x"],
+                history["predicted_y"][iter_idx],
+                label=f"Iteration {iter_idx}",
+                alpha=0.3
+            )
+
+    axs[1].set_title("Target vs Optimized Function")
+    axs[1].set_xlabel("x")
+    axs[1].set_ylabel("y")
+    axs[1].grid(True)
+    axs[1].legend()
+
+    plt.tight_layout()
+    return fig
+
+
+# Example usage:
+def demo_optimization():
+    # Define a complex target function
+    def target_function(x):
+        return (
+            2.5 + torch.sin(x * 20) * 0.5 +
+            torch.sin(x * 7) * 1.0 +
+            torch.sin(x * 2) * 1.5
+        )
+
+    # Optimize a fractal function
+    optimized_func, history = optimize_fractal_function(
+        target_function=target_function,
+        num_points=1000,
+        num_values=4,  # Number of base values
+        max_depth=4,  # Recursion depth
+        num_iterations=1000,
+        learning_rate=0.01,
+        show_progress=True
+    )
+
+    # Plot results
+    fig = plot_optimization_results(
+        history,
+        show_iterations=[0, 99, 199, 499]  # Show some intermediate results
+    )
+
+    # Print optimized parameters
+    print(f"Optimized split points: {optimized_func.split_points}")
+    print(f"Optimized values: {optimized_func.values}")
+
+    return optimized_func, history, fig
+
+# Run the demo if executed as main script
+if __name__ == "__main__":
+    optimized_func, history, fig = demo_optimization()
+    plt.show()
+```
+
+This optimization loop:
+
+1. Creates trainable parameters for split points, values, and the left/right matrices
+2. Takes a target function to approximate
+3. Runs an Adam optimizer to minimize MSE loss between the target and fractal function
+4. Applies constraints to keep parameters in valid ranges
+5. Adds light regularization to encourage diverse values
+6. Tracks optimization history and saves the best state
+7. Returns the optimized fractal function with argmax mode for inference
+
+You can use this to approximate various target functions. The demo shows an example with a complex multi-frequency sinusoidal function, but you can replace it with any function you want to approximate.
+
+To use it with a specific target curve:
+
+```python
+# Example with a custom target function
+def my_target_function(x):
+    # Define your complex curve here
+    return some_complex_expression(x)
+
+# Optimize
+optimized_func, history = optimize_fractal_function(
+    target_function=my_target_function,
+    num_values=5,  # Try different numbers of base values
+    max_depth=5,   # Try different depths
+    num_iterations=2000
+)
+
+# Visualize results
+fig = plot_optimization_results(history)
+plt.show()
+```
+
+For real data points instead of a function, you can interpolate them into a function first, or modify the optimization loop to evaluate loss only at the given data points.
+
+## USER:
+
+Plot continuously during training (new plots every n steps). Show me the whole optimization code again. Also give me an example target curve (not a function but some non-contiguous list of numbers) to optimize. Keep the plotting function broken up as a separate function for readability.
+
+
+
+
+
+## ASSISTANT:
+
+Here's the complete optimization code with continuous plotting during training and an example target curve using non-contiguous data points:
+
+```python
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from IPython.display import clear_output
+
+def optimize_fractal_function(
+    target_y: torch.Tensor,
+    target_x: torch.Tensor = None,
+    num_values: int = 3,
+    max_depth: int = 4,
+    num_iterations: int = 2000,
+    learning_rate: float = 0.01,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    smoothing_width: float = 0.1,
+    plot_every_n: int = 50,
+    show_progress: bool = True,
+) -> tuple[FractalFunction, dict]:
+    """
+    Optimize a fractal function to approximate a target curve.
+
+    Args:
+        target_y: Target y values to approximate
+        target_x: Corresponding x values (if None, evenly spaced from 0 to 1)
+        num_values: Number of base values to optimize
+        max_depth: Maximum recursion depth for fractal
+        num_iterations: Number of optimization iterations
+        learning_rate: Learning rate for Adam optimizer
+        device: Device to run optimization on
+        smoothing_width: Smoothing width for transitions
+        plot_every_n: Plot every n iterations (0 to disable)
+        show_progress: Whether to print progress updates
+
+    Returns:
+        Tuple of (optimized fractal function, optimization history)
+    """
+    # Move target data to device
+    if target_x is None:
+        target_x = torch.linspace(0, 1, len(target_y), device=device)
+    else:
+        target_x = target_x.to(device)
+
+    target_y = target_y.to(device)
+
+    # Normalize x values to [0,1] if they aren't already
+    if target_x.min() != 0 or target_x.max() != 1:
+        x_min, x_max = target_x.min(), target_x.max()
+        target_x = (target_x - x_min) / (x_max - x_min)
+
+    # Normalize y values to [1,5] range
+    y_min, y_max = target_y.min(), target_y.max()
+    target_y = (target_y - y_min) * (4.0 / (y_max - y_min)) + 1.0
+
+    # Create dense evaluation points for visualization
+    eval_x = torch.linspace(0, 1, 500, device=device)
+
+    # Create learnable parameters
+    split_points_param = torch.nn.Parameter(
+        torch.rand(num_values, device=device) * 0.5 + 0.25  # Initialize in [0.25, 0.75]
+    )
+    values_param = torch.nn.Parameter(
+        torch.rand(num_values, device=device) * 4.0 + 1.0  # Initialize in [1, 5]
+    )
+    left_matrix = torch.nn.Parameter(
+        torch.randn(num_values, num_values, device=device) * 0.1
+    )
+    right_matrix = torch.nn.Parameter(
+        torch.randn(num_values, num_values, device=device) * 0.1
+    )
+
+    # Optimizer
+    optimizer = torch.optim.Adam(
+        [split_points_param, values_param, left_matrix, right_matrix],
+        lr=learning_rate
+    )
+
+    # Track history
+    history = {
+        "loss": [],
+        "split_points": [],
+        "values": [],
+        "left_matrix": [],
+        "right_matrix": [],
+        "predicted_y": [],
+        "iterations": []
+    }
+
+    # Setup figure for live plotting
+    if plot_every_n > 0:
+        plt.ion()  # Enable interactive mode
+        fig, axs = plt.subplots(2, 1, figsize=(10, 10))
+        fig.tight_layout(pad=3.0)
+
+    # Optimization loop
+    best_loss = float('inf')
+    best_state = None
+
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+
+        # Apply constraints to parameters
+        split_points = torch.sigmoid(split_points_param) * 0.8 + 0.1  # Constrain to [0.1, 0.9]
+        values = torch.clamp(values_param, 1.0, 5.0)
+
+        # Create fractal function
+        fractal_func = generate_fractal_function(
+            split_points=split_points.tolist(),
+            values=values.tolist(),
+            left_children_matrix=left_matrix,
+            right_children_matrix=right_matrix,
+            max_depth=max_depth,
+            smoothing_width=smoothing_width,
+            use_argmax=False  # Use softmax during training
+        )
+
+        # Evaluate function at the target x points
+        predicted_y = fractal_func(target_x)
+
+        # Calculate loss (MSE)
+        loss = torch.nn.functional.mse_loss(predicted_y, target_y)
+
+        # Add regularization to encourage diversity in values
+        value_diversity_loss = -torch.std(values) * 0.01
+        total_loss = loss + value_diversity_loss
+
+        # Backward and optimize
+        total_loss.backward()
+        optimizer.step()
+
+        # Save history
+        history["loss"].append(loss.item())
+
+        # Live plotting
+        if plot_every_n > 0 and (i % plot_every_n == 0 or i == num_iterations - 1):
+            history["split_points"].append(split_points.detach().cpu().numpy())
+            history["values"].append(values.detach().cpu().numpy())
+            history["left_matrix"].append(left_matrix.detach().cpu().numpy())
+            history["right_matrix"].append(right_matrix.detach().cpu().numpy())
+            history["iterations"].append(i)
+
+            # Evaluate at dense points for visualization
+            with torch.no_grad():
+                eval_y = fractal_func(eval_x)
+                history["predicted_y"].append(eval_y.detach().cpu().numpy())
+
+            # Plot in-place updates
+            plot_optimization_live(
+                axs=axs,
+                iteration=i,
+                loss_history=history["loss"],
+                target_x=target_x.cpu().numpy(),
+                target_y=target_y.cpu().numpy(),
+                eval_x=eval_x.cpu().numpy(),
+                current_y=eval_y.cpu().numpy(),
+                split_points=split_points.detach().cpu().numpy(),
+                values=values.detach().cpu().numpy()
+            )
+
+            # Force plot update
+            plt.pause(0.01)
+
+        if show_progress and (i % 100 == 0 or i == num_iterations - 1):
+            print(f"Iteration {i}/{num_iterations}, Loss: {loss.item():.6f}")
+
+        # Save best state
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_state = {
+                "split_points": split_points.detach().clone(),
+                "values": values.detach().clone(),
+                "left_matrix": left_matrix.detach().clone(),
+                "right_matrix": right_matrix.detach().clone(),
+            }
+
+    # Create final function using best parameters
+    final_func = generate_fractal_function(
+        split_points=best_state["split_points"].tolist(),
+        values=best_state["values"].tolist(),
+        left_children_matrix=best_state["left_matrix"],
+        right_children_matrix=best_state["right_matrix"],
+        max_depth=max_depth,
+        smoothing_width=smoothing_width,
+        use_argmax=True  # Use argmax for final model
+    )
+
+    # Store final results and denormalization info
+    history["final_parameters"] = best_state
+    history["normalization"] = {
+        "y_min": y_min.item(),
+        "y_max": y_max.item(),
+        "x_min": target_x.min().item() if target_x is not None else 0,
+        "x_max": target_x.max().item() if target_x is not None else 1
+    }
+
+    # Final evaluation for visualization
+    with torch.no_grad():
+        final_y = final_func(eval_x)
+        history["final_y"] = final_y.cpu().numpy()
+        history["eval_x"] = eval_x.cpu().numpy()
+        history["target_x"] = target_x.cpu().numpy()
+        history["target_y"] = target_y.cpu().numpy()
+
+    # Close the live plot
+    if plot_every_n > 0:
+        plt.ioff()
+
+    # Return optimized function and history
+    return final_func, history
+
+
+def plot_optimization_live(
+    axs,
+    iteration: int,
+    loss_history: list,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    eval_x: np.ndarray,
+    current_y: np.ndarray,
+    split_points: np.ndarray,
+    values: np.ndarray
+):
+    """Update the live plot with current optimization state"""
+    # Clear axes
+    axs[0].clear()
+    axs[1].clear()
+
+    # Plot loss history
+    axs[0].plot(loss_history)
+    axs[0].set_title(f"Loss (Iteration {iteration})")
+    axs[0].set_xlabel("Iteration")
+    axs[0].set_ylabel("MSE Loss")
+    axs[0].set_yscale('log')
+    axs[0].grid(True)
+
+    # Plot current fit vs target
+    axs[1].scatter(target_x, target_y, alpha=0.7, label="Target Points", color="black")
+    axs[1].plot(eval_x, current_y, label="Current Fit", color="red", linewidth=2)
+
+    # Mark split points and values on x-axis
+    for i, (sp, val) in enumerate(zip(split_points, values)):
+        axs[1].axvline(x=sp, linestyle='--', alpha=0.3, color='gray')
+        axs[1].text(sp, 1.0, f"{sp:.2f}", ha='center', va='bottom', alpha=0.7)
+        axs[1].text(0.05, val, f"v{i}={val:.2f}", ha='left', va='center', alpha=0.7)
+
+    axs[1].set_title(f"Target vs. Current Fit (Iteration {iteration})")
+    axs[1].set_xlabel("x")
+    axs[1].set_ylabel("y")
+    axs[1].grid(True)
+    axs[1].legend()
+
+
+def plot_optimization_results(history: dict, show_iterations: list[int] = None):
+    """Plot the final optimization results"""
+    # Create figure
+    fig, axs = plt.subplots(2, 1, figsize=(12, 10))
+
+    # Plot loss
+    axs[0].plot(history["loss"])
+    axs[0].set_title("Loss over iterations")
+    axs[0].set_xlabel("Iteration")
+    axs[0].set_ylabel("MSE Loss")
+    axs[0].set_yscale('log')
+    axs[0].grid(True)
+
+    # Plot final result
+    axs[1].scatter(
+        history["target_x"],
+        history["target_y"],
+        label="Target Points",
+        color="black",
+        alpha=0.7
+    )
+    axs[1].plot(
+        history["eval_x"],
+        history["final_y"],
+        label="Optimized Fractal",
+        color="red",
+        linewidth=2
+    )
+
+    # Show intermediate results if requested
+    if show_iterations and "iterations" in history:
+        for i, iter_idx in enumerate(show_iterations):
+            # Find the closest saved iteration
+            if iter_idx in history["iterations"]:
+                idx = history["iterations"].index(iter_idx)
+                axs[1].plot(
+                    history["eval_x"],
+                    history["predicted_y"][idx],
+                    label=f"Iteration {iter_idx}",
+                    alpha=0.3
+                )
+
+    # Mark final split points and values
+    split_points = history["final_parameters"]["split_points"].cpu().numpy()
+    values = history["final_parameters"]["values"].cpu().numpy()
+
+    for i, (sp, val) in enumerate(zip(split_points, values)):
+        axs[1].axvline(x=sp, linestyle='--', alpha=0.3, color='gray')
+        axs[1].text(sp, 1.0, f"{sp:.2f}", ha='center', va='bottom', alpha=0.7)
+        axs[1].text(0.05, val, f"v{i}={val:.2f}", ha='left', va='center', alpha=0.7)
+
+    axs[1].set_title("Target vs Optimized Function")
+    axs[1].set_xlabel("x")
+    axs[1].set_ylabel("y")
+    axs[1].grid(True)
+    axs[1].legend()
+
+    plt.tight_layout()
+    return fig
+
+
+# Example with a non-contiguous target curve
+def create_sample_target_curve(num_points=50, noise_level=0.2):
+    """Create a sample target curve with noise and gaps"""
+    # Create non-uniformly spaced x values with gaps
+    np.random.seed(42)  # For reproducibility
+    x_values = np.sort(np.random.rand(num_points) * 0.8 + 0.1)  # Range [0.1, 0.9]
+
+    # Create clusters with gaps
+    mask = np.ones_like(x_values, dtype=bool)
+    # Create gap regions
+    gap_regions = [(0.2, 0.25), (0.4, 0.5), (0.7, 0.75)]
+    for start, end in gap_regions:
+        mask = mask & ~((x_values >= start) & (x_values <= end))
+
+    x_values = x_values[mask]
+
+    # Create y values with multiple frequency components + noise
+    base_signal = (
+        np.sin(x_values * 20) * 0.5 +
+        np.sin(x_values * 7) * 1.0 +
+        np.sin(x_values * 2) * 1.5
+    )
+
+    # Add noise
+    noise = np.random.randn(len(x_values)) * noise_level
+    y_values = base_signal + noise
+
+    # Manually add some outliers
+    outlier_indices = np.random.choice(len(y_values), 3, replace=False)
+    y_values[outlier_indices] += np.random.randn(3) * 1.0
+
+    return torch.tensor(x_values, dtype=torch.float32), torch.tensor(y_values, dtype=torch.float32)
+
+
+# Demo function
+def demo_optimization():
+    # Create a non-contiguous target curve
+    target_x, target_y = create_sample_target_curve(num_points=70, noise_level=0.3)
+
+    # Optimize a fractal function
+    optimized_func, history = optimize_fractal_function(
+        target_y=target_y,
+        target_x=target_x,
+        num_values=5,  # Number of base values
+        max_depth=4,   # Recursion depth
+        num_iterations=1000,
+        learning_rate=0.01,
+        plot_every_n=20,  # Plot every 20 iterations
+        show_progress=True
+    )
+
+    # Plot final results
+    fig = plot_optimization_results(
+        history,
+        show_iterations=[0, 100, 200, 500]  # Show some intermediate results
+    )
+
+    # Print optimized parameters
+    print("\nOptimized Parameters:")
+    print(f"Split Points: {optimized_func.split_points}")
+    print(f"Values: {optimized_func.values}")
+
+    return optimized_func, history, fig
+
+# Run the demo if executed as main script
+if __name__ == "__main__":
+    optimized_func, history, fig = demo_optimization()
+    plt.show()
+```
+
+This code includes:
+
+1. **Continuous plotting**: Updates the plot every N iterations, showing both the loss curve and the current fractal fit.
+
+2. **Non-contiguous target curve**: The `create_sample_target_curve` function generates synthetic data with:
+   - Non-uniform spacing
+   - Intentional gaps in the data
+   - Multiple frequency components
+   - Random noise
+   - Some outliers
+
+3. **Separated plotting functions**:
+   - `plot_optimization_live`: Updates the live plot during training
+   - `plot_optimization_results`: Creates a final summary plot
+
+4. **Enhanced tracking**: The history dictionary now stores more information, including matrices and parameter values at specific iterations.
+
+5. **Interactive visualization**: Uses `plt.ion()` and `plt.pause()` to update the plot continuously.
+
+The target curve in this example is particularly challenging because it:
+1. Has non-uniform spacing (clustered data points)
+2. Contains intentional gaps with no data
+3. Mixes multiple frequencies
+4. Includes noise and outliers
+
+This should give you a good demonstration of how well the fractal function can approximate complex, non-contiguous data patterns. The live plotting will help you visualize how the optimization progresses and how the model adapts to fit the challenging target curve.
+
+## USER:
+
+The argmax output is very different to the softmaxed output.
+
+## ASSISTANT:
+
+You're right, and that's an important observation. The argmax and softmax outputs can be significantly different, which creates a disconnect between training and inference. Let's address this issue:
+
+### Why argmax and softmax outputs differ
+
+1. **Softmax during training**: Creates a weighted blend of all possible child paths based on their probabilities
+2. **Argmax during inference**: Takes only the single best child path at each branch
+
+This can lead to different behavior because:
+- Softmax explores multiple paths simultaneously, averaging their outputs
+- Argmax commits to a single decision at each branch point
+
+### Solution: Train with Both Approaches
+
+We need to ensure consistency between training and inference. Here's how to modify the code:
+
+```python
+def optimize_fractal_function(
+    target_y: torch.Tensor,
+    target_x: torch.Tensor = None,
+    num_values: int = 3,
+    max_depth: int = 4,
+    num_iterations: int = 2000,
+    learning_rate: float = 0.01,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    smoothing_width: float = 0.1,
+    plot_every_n: int = 50,
+    show_progress: bool = True,
+    argmax_loss_weight: float = 0.5,  # Weight for the argmax loss component
+) -> tuple[FractalFunction, dict]:
+    # ... [earlier code remains the same] ...
+
+    # Optimization loop
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+
+        # Apply constraints to parameters
+        split_points = torch.sigmoid(split_points_param) * 0.8 + 0.1
+        values = torch.clamp(values_param, 1.0, 5.0)
+
+        # Create softmax fractal function (for differentiability)
+        softmax_func = generate_fractal_function(
+            split_points=split_points.tolist(),
+            values=values.tolist(),
+            left_children_matrix=left_matrix,
+            right_children_matrix=right_matrix,
+            max_depth=max_depth,
+            smoothing_width=smoothing_width,
+            use_argmax=False
+        )
+
+        # Create argmax fractal function (for inference consistency)
+        with torch.no_grad():  # No grad needed for forward pass
+            argmax_func = generate_fractal_function(
+                split_points=split_points.tolist(),
+                values=values.tolist(),
+                left_children_matrix=left_matrix,
+                right_children_matrix=right_matrix,
+                max_depth=max_depth,
+                smoothing_width=smoothing_width,
+                use_argmax=True
+            )
+
+        # Evaluate both functions
+        softmax_pred = softmax_func(target_x)
+
+        # For argmax prediction, detach paths but keep param gradients
+        argmax_pred = argmax_func(target_x)
+        argmax_pred = argmax_pred.detach() + 0 * softmax_pred.sum()  # Trick to keep param gradients
+
+        # Calculate losses
+        softmax_loss = torch.nn.functional.mse_loss(softmax_pred, target_y)
+        argmax_loss = torch.nn.functional.mse_loss(argmax_pred, target_y)
+
+        # Combined loss with weighting
+        loss = (1 - argmax_loss_weight) * softmax_loss + argmax_loss_weight * argmax_loss
+
+        # Add regularization
+        value_diversity_loss = -torch.std(values) * 0.01
+        total_loss = loss + value_diversity_loss
+
+        # Backward and optimize
+        total_loss.backward()
+        optimizer.step()
+
+        # Save history
+        history["loss"].append(loss.item())
+        history["softmax_loss"].append(softmax_loss.item())
+        history["argmax_loss"].append(argmax_loss.item())
+
+        # Live plotting
+        if plot_every_n > 0 and (i % plot_every_n == 0 or i == num_iterations - 1):
+            # ... [plotting code] ...
+
+            # Evaluate both models for visualization
+            with torch.no_grad():
+                softmax_eval_y = softmax_func(eval_x)
+                argmax_eval_y = argmax_func(eval_x)
+                history["softmax_y"].append(softmax_eval_y.cpu().numpy())
+                history["argmax_y"].append(argmax_eval_y.cpu().numpy())
+
+            # Update plot to show both
+            plot_optimization_live(
+                axs=axs,
+                iteration=i,
+                loss_history=history["loss"],
+                target_x=target_x.cpu().numpy(),
+                target_y=target_y.cpu().numpy(),
+                eval_x=eval_x.cpu().numpy(),
+                softmax_y=softmax_eval_y.cpu().numpy(),
+                argmax_y=argmax_eval_y.cpu().numpy(),
+                split_points=split_points.detach().cpu().numpy(),
+                values=values.detach().cpu().numpy()
+            )
+
+            # ... [rest of the function] ...
+```
+
+### Updated Live Plotting Function
+
+```python
+def plot_optimization_live(
+    axs,
+    iteration: int,
+    loss_history: list,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    eval_x: np.ndarray,
+    softmax_y: np.ndarray,
+    argmax_y: np.ndarray,
+    split_points: np.ndarray,
+    values: np.ndarray
+):
+    """Update the live plot with current optimization state"""
+    # Clear axes
+    axs[0].clear()
+    axs[1].clear()
+
+    # Plot loss history
+    axs[0].plot(loss_history)
+    axs[0].set_title(f"Loss (Iteration {iteration})")
+    axs[0].set_xlabel("Iteration")
+    axs[0].set_ylabel("MSE Loss")
+    axs[0].set_yscale('log')
+    axs[0].grid(True)
+
+    # Plot current fit vs target
+    axs[1].scatter(target_x, target_y, alpha=0.7, label="Target Points", color="black")
+    axs[1].plot(eval_x, softmax_y, label="Softmax Fit", color="blue", linewidth=2)
+    axs[1].plot(eval_x, argmax_y, label="Argmax Fit", color="red", linestyle='--', linewidth=2)
+
+    # Mark split points and values on x-axis
+    for i, (sp, val) in enumerate(zip(split_points, values)):
+        axs[1].axvline(x=sp, linestyle='--', alpha=0.3, color='gray')
+        axs[1].text(sp, 1.0, f"{sp:.2f}", ha='center', va='bottom', alpha=0.7)
+        axs[1].text(0.05, val, f"v{i}={val:.2f}", ha='left', va='center', alpha=0.7)
+
+    axs[1].set_title(f"Target vs. Current Fit (Iteration {iteration})")
+    axs[1].set_xlabel("x")
+    axs[1].set_ylabel("y")
+    axs[1].grid(True)
+    axs[1].legend()
+```
+
+### Alternative Solution: Direct Gradients from Argmax
+
+For an even more direct approach, we can modify the fractal function generator to allow gradient flow through the argmax path. This is more complex but would create a truly end-to-end differentiable argmax path:
+
+```python
+def generate_fractal_function(
+    # ... [existing parameters] ...
+    straight_through_gradient: bool = False,  # Enable straight-through gradient for argmax
+):
+    """
+    Creates a fractal function through differentiable function composition.
+
+    Args:
+        # ... [existing docs] ...
+        straight_through_gradient: If True, enables straight-through gradient estimation for argmax
+    """
+    if use_argmax:
+        if straight_through_gradient:
+            # Compute softmax probabilities
+            left_probs = torch.nn.functional.softmax(left_children_matrix, dim=1)
+            right_probs = torch.nn.functional.softmax(right_children_matrix, dim=1)
+
+            # Get argmax indices
+            left_indices = torch.argmax(left_children_matrix, dim=1)
+            right_indices = torch.argmax(right_children_matrix, dim=1)
+
+            # Create one-hot tensors
+            batch_size = left_children_matrix.shape[0]
+            num_classes = left_children_matrix.shape[1]
+
+            left_one_hot = torch.zeros_like(left_probs)
+            right_one_hot = torch.zeros_like(right_probs)
+
+            # Set one-hot indices
+            left_one_hot.scatter_(1, left_indices.unsqueeze(1), 1.0)
+            right_one_hot.scatter_(1, right_indices.unsqueeze(1), 1.0)
+
+            # Straight-through gradient estimator:
+            # Use argmax (one-hot) in forward pass but softmax gradient in backward
+            left_children_probs = left_one_hot.detach() - left_probs.detach() + left_probs
+            right_children_probs = right_one_hot.detach() - right_probs.detach() + right_probs
+        else:
+            # Traditional argmax with no gradient
+            left_indices = torch.argmax(left_children_matrix, dim=1)
+            right_indices = torch.argmax(right_children_matrix, dim=1)
+            left_children_probs = None
+            right_children_probs = None
+    else:
+        # Standard softmax probabilities
+        left_children_probs = torch.nn.functional.softmax(left_children_matrix, dim=1)
+        right_children_probs = torch.nn.functional.softmax(right_children_matrix, dim=1)
+
+    # ... [rest of function remains the same] ...
+```
+
+### Recommendation
+
+I recommend the first approach (optimizing for both argmax and softmax outputs) as it's simpler and provides clear visibility into both outputs. This helps ensure that the model performs well both during training and inference.
+
+Key benefits:
+1. You can see both outputs during training
+2. The model trains to make both outputs match the target
+3. You can adjust the weight between softmax and argmax loss components
+4. It doesn't require complex gradient manipulation
+
+This approach will help minimize the gap between training and inference behavior, which is crucial for consistent model performance.
+
+## USER:
+
+Is the generate_fractal_function straight-through gradient complete? Feels like it's missing something
+
+Here's the current implementation
+
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/simple.py</ai-context>
+
+
+
+## ASSISTANT:
+
+You're right - the straight-through gradient implementation is incomplete. Here's the complete version of `generate_fractal_function` with proper straight-through gradient estimation:
+
+```python
+def generate_fractal_function(
+    split_points: list[float],
+    values: list[float],
+    left_children_matrix: torch.Tensor,   # Shape [len(values), len(values)]
+    right_children_matrix: torch.Tensor,  # Shape [len(values), len(values)]
+    max_depth: int = 3,
+    smoothing_width: float = 0.1,
+    use_argmax: bool = False,  # Use argmax instead of softmax for inference
+    straight_through_gradient: bool = False,  # Enable straight-through gradient for argmax
+) -> FractalFunction:
+    """
+    Creates a fractal function through differentiable function composition.
+
+    Args:
+        split_points: List of split points (0-1) for each segment
+        values: Base values for each segment
+        left_children_matrix: Matrix of child logits for left branches [len(values), len(values)]
+        right_children_matrix: Matrix of child logits for right branches [len(values), len(values)]
+        max_depth: Maximum recursion depth
+        smoothing_width: Width of the smoothing transition (0-1)
+        use_argmax: If True, uses deterministic argmax path instead of probabilistic softmax
+        straight_through_gradient: If True and use_argmax is True, enables straight-through
+                                  gradient estimation for argmax operations
+
+    Returns:
+        A composable differentiable function object
+    """
+    if use_argmax:
+        if straight_through_gradient:
+            # Compute softmax probabilities for gradient flow
+            left_probs = torch.nn.functional.softmax(left_children_matrix, dim=1)
+            right_probs = torch.nn.functional.softmax(right_children_matrix, dim=1)
+
+            # Get argmax indices
+            left_indices = torch.argmax(left_children_matrix, dim=1)
+            right_indices = torch.argmax(right_children_matrix, dim=1)
+
+            # Create one-hot tensors
+            num_values = left_children_matrix.shape[1]
+
+            left_one_hot = torch.nn.functional.one_hot(left_indices, num_values).float()
+            right_one_hot = torch.nn.functional.one_hot(right_indices, num_values).float()
+
+            # Straight-through gradient estimator:
+            # Forward: Use argmax (one-hot)
+            # Backward: Use softmax gradients
+            # formula: y = one_hot.detach() - probs.detach() + probs
+            left_children_probs = left_one_hot.detach() - left_probs.detach() + left_probs
+            right_children_probs = right_one_hot.detach() - right_probs.detach() + right_probs
+        else:
+            # Traditional argmax with no gradient
+            left_indices = torch.argmax(left_children_matrix, dim=1)
+            right_indices = torch.argmax(right_children_matrix, dim=1)
+            left_children_probs = None
+            right_children_probs = None
+    else:
+        # Standard softmax probabilities
+        left_children_probs = torch.nn.functional.softmax(left_children_matrix, dim=1)
+        right_children_probs = torch.nn.functional.softmax(right_children_matrix, dim=1)
+
+    # Function cache to prevent exponential explosion
+    function_cache = {}
+
+    def build_function(
+        depth: int,
+        start: float,
+        end: float,
+        parent_idx: int,
+    ) -> FractalFunction:
+        """Recursively build the fractal function for range [start, end]"""
+        # Use memoization to avoid exponential explosion
+        cache_key = (depth, start, end, parent_idx)
+        if cache_key in function_cache:
+            return function_cache[cache_key]
+
+        value = values[parent_idx]
+
+        # Base case - maximum depth reached
+        if depth == max_depth:
+            result = ConstantFunction(value)
+            function_cache[cache_key] = result
+            return result
+
+        # Calculate split position in absolute coordinates
+        split = split_points[parent_idx % len(split_points)]
+        mid = start + split * (end - start)
+
+        # Create transition function with width that scales with segment size
+        segment_size = end - start
+        trans_width = smoothing_width * segment_size
+        transition = SigmoidFunction(mid, trans_width)
+
+        if use_argmax and not straight_through_gradient:
+            # Simply use the best child for each branch (no gradient)
+            left_child_idx = left_indices[parent_idx].item()
+            right_child_idx = right_indices[parent_idx].item()
+
+            left_func = build_function(depth + 1, start, mid, left_child_idx)
+            right_func = build_function(depth + 1, mid, end, right_child_idx)
+        else:
+            # Either using softmax OR argmax with straight-through gradient
+            # In both cases, we'll use probability weighting
+
+            # Get the probabilities for the current parent
+            if use_argmax and straight_through_gradient:
+                # Use straight-through gradient probs
+                left_probs = left_children_probs[parent_idx]
+                right_probs = right_children_probs[parent_idx]
+            else:
+                # Use regular softmax probs
+                left_probs = left_children_probs[parent_idx]
+                right_probs = right_children_probs[parent_idx]
+
+            # Create weighted left branch (blend of all possible children)
+            left_branches = []
+            for i, prob in enumerate(left_probs):
+                if prob > 1e-5:  # Skip negligible contributions
+                    child_func = build_function(depth + 1, start, mid, i)
+                    left_branches.append((prob, child_func))
+
+            # Create weighted right branch (blend of all possible children)
+            right_branches = []
+            for i, prob in enumerate(right_probs):
+                if prob > 1e-5:  # Skip negligible contributions
+                    child_func = build_function(depth + 1, mid, end, i)
+                    right_branches.append((prob, child_func))
+
+            # Combine left branches with weighted blending
+            if not left_branches:
+                left_func = ConstantFunction(values[0])
+            else:
+                # Sort by weight descending to blend most significant first
+                left_branches.sort(key=lambda x: x[0], reverse=True)
+                left_func = left_branches[0][1]
+                total_weight = left_branches[0][0]
+
+                # Incrementally blend the functions with proper weighting
+                for weight, func in left_branches[1:]:
+                    # Calculate relative weight for this blend
+                    blend_weight = weight / (total_weight + weight)
+                    weight_func = ConstantFunction(blend_weight)
+                    left_func = BlendedFunction(left_func, func, weight_func, depth)
+                    total_weight = total_weight + weight
+
+            # Repeat for right branches
+            if not right_branches:
+                right_func = ConstantFunction(values[0])
+            else:
+                right_branches.sort(key=lambda x: x[0], reverse=True)
+                right_func = right_branches[0][1]
+                total_weight = right_branches[0][0]
+
+                for weight, func in right_branches[1:]:
+                    blend_weight = weight / (total_weight + weight)
+                    weight_func = ConstantFunction(blend_weight)
+                    right_func = BlendedFunction(right_func, func, weight_func, depth)
+                    total_weight = total_weight + weight
+
+        # Create final blended function
+        result = BlendedFunction(left_func, right_func, transition, depth)
+        function_cache[cache_key] = result
+        return result
+
+    # Create the full function with domain restriction
+    fractal_func = build_function(depth=0, start=0.0, end=1.0, parent_idx=0)
+
+    # Create wrapper with domain restriction
+    class DomainRestrictedFractal(FractalFunction):
+        def __init__(self, func: FractalFunction):
+            self.func = func
+            # Store parameters to allow gradient flow
+            self.left_children_matrix = left_children_matrix
+            self.right_children_matrix = right_children_matrix
+            self.split_points = split_points
+            self.values = values
+            self.use_argmax = use_argmax
+            self.straight_through_gradient = straight_through_gradient
+
+        def __call__(self, x: torch.Tensor) -> torch.Tensor:
+            x_clipped = torch.clamp(x, 0.0, 1.0)
+            return self.func(x_clipped)
+
+        def __repr__(self) -> str:
+            return f"f(x) = {self.func}"
+
+    return DomainRestrictedFractal(fractal_func)
+```
+
+The key changes made:
+
+1. **Properly implemented straight-through gradient estimation**:
+   - Convert indices to one-hot vectors using `torch.nn.functional.one_hot`
+   - Apply the straight-through gradient formula: `one_hot.detach() - probs.detach() + probs`
+   - This allows gradients to flow through the argmax operation during backpropagation
+
+2. **Added logic to handle both cases in `build_function`**:
+   - Separated the traditional argmax path (no gradient)
+   - Added a path for argmax with straight-through gradients
+   - Reused the same weighted blending logic for both softmax and straight-through cases
+
+3. **Stored additional settings in the wrapper class**:
+   - Added `straight_through_gradient` to the `DomainRestrictedFractal` class
+   - This helps keep track of how the function was created
+
+This implementation should allow you to train with argmax paths while maintaining gradient flow. You can now use this in your optimization loop with:
+
+```python
+# Create fractal function with straight-through gradient estimation
+func = generate_fractal_function(
+    left_children_matrix=left_matrix,
+    right_children_matrix=right_matrix,
+    split_points=split_points.tolist(),
+    values=values.tolist(),
+    max_depth=max_depth,
+    smoothing_width=smoothing_width,
+    use_argmax=True,
+    straight_through_gradient=True  # Enable gradient flow through argmax
+)
+```
+
+This approach should help reduce the gap between training and inference behavior since you're directly optimizing the argmax path rather than a softmax approximation.
+
+## USER:
+
+how does that work? i thought detach broke the diff graph?
+
+## ASSISTANT:
+
+You're right to question this - it's an excellent observation. The straight-through estimator works in a counterintuitive way, and the implementation uses a clever trick. Let me explain how it works:
+
+### How the Straight-Through Gradient Estimator Works
+
+The expression `one_hot.detach() - probs.detach() + probs` might look confusing because of the detach() operations. Here's how it works:
+
+1. **Forward Pass**: During the forward pass, the computation is:
+   ```
+   output = one_hot.detach() - probs.detach() + probs
+          = one_hot - probs + probs
+          = one_hot
+   ```
+   So the forward pass uses the one-hot vectors (the argmax result).
+
+2. **Backward Pass**: During backpropagation, gradients flow through the computation graph. When we take the derivative:
+   ```
+   ∂output/∂probs = ∂(one_hot.detach() - probs.detach() + probs)/∂probs
+                   = 0 - 0 + 1
+                   = 1
+   ```
+
+So while we use the argmax values in the forward pass, the gradient is as if we were just using `probs` directly.
+
+### Mathematical Explanation
+
+Let's break it down mathematically with a simpler example:
+
+Suppose we have:
+- `x`: input with gradients
+- `f(x)`: a non-differentiable function (like argmax)
+- `g(x)`: a differentiable approximation of f(x) (like softmax)
+
+The straight-through estimator is:
+```
+y = f(x).detach() - g(x).detach() + g(x)
+```
+
+During the forward pass:
+```
+y = f(x) - g(x) + g(x) = f(x)
+```
+
+During the backward pass:
+```
+∂y/∂x = ∂(f(x).detach() - g(x).detach() + g(x))/∂x
+      = 0 - 0 + ∂g(x)/∂x
+      = ∂g(x)/∂x
+```
+
+This means we use the values from `f(x)` (argmax) but the gradients from `g(x)` (softmax).
+
+### Visualizing with Code
+
+Here's a minimal example to demonstrate:
+
+```python
+import torch
+
+# Create a tensor with gradients
+x = torch.tensor([0.1, 0.7, 0.2], requires_grad=True)
+
+# Non-differentiable operation (one-hot from argmax)
+index = torch.argmax(x)
+one_hot = torch.zeros_like(x)
+one_hot[index] = 1.0
+one_hot = one_hot.detach()  # Detach to remove from graph
+
+# Differentiable approximation (softmax)
+softmax = torch.softmax(x, dim=0)
+
+# Straight-through estimator
+y = one_hot - softmax.detach() + softmax
+
+print("x:", x)
+print("one_hot:", one_hot)
+print("softmax:", softmax)
+print("y:", y)
+
+# Backpropagate
+y.sum().backward()
+
+# The gradient on x is the same as if we just used softmax
+print("x.grad:", x.grad)
+
+# Compare to what softmax gradient would be
+x_clone = x.detach().clone().requires_grad_(True)
+softmax_clone = torch.softmax(x_clone, dim=0)
+softmax_clone.sum().backward()
+print("softmax gradient:", x_clone.grad)
+```
+
+### Why This Works
+
+This trick is powerful because it lets us use non-differentiable operations like argmax in the forward pass while still allowing gradients to flow during backpropagation.
+
+It's an approximation - the true gradient of argmax would be zeros everywhere except at the transition points where it would be infinite. This is not useful for optimization, so we substitute a more reasonable gradient (from softmax).
+
+The operation `detach()` does indeed break the differentiation graph, but only for that specific tensor. In the expression `one_hot.detach() - probs.detach() + probs`, the last term `probs` still has its gradient information, so when we compute the overall gradient, the gradient through that term is preserved.
+
+It's a bit like saying "use these values, but pretend they came from this other differentiable function when calculating gradients."
+
+## USER:
+
+Would gumbel softmax with hard=True do the same thing with less code?
+
+## ASSISTANT:
+
+Yes! You're absolutely right. Using Gumbel-Softmax with `hard=True` would achieve the same effect with much less code. This is an excellent observation.
+
+Gumbel-Softmax (also called Concrete distribution) is a differentiable relaxation of the categorical distribution with a temperature parameter. When the `hard=True` option is used, it does exactly what we implemented manually with the straight-through estimator.
+
+Here's how we could simplify the implementation using Gumbel-Softmax:
+
+```python
+def generate_fractal_function(
+    split_points: list[float],
+    values: list[float],
+    left_children_matrix: torch.Tensor,   # Shape [len(values), len(values)]
+    right_children_matrix: torch.Tensor,  # Shape [len(values), len(values)]
+    max_depth: int = 3,
+    smoothing_width: float = 0.1,
+    use_argmax: bool = False,  # Use argmax instead of softmax for inference
+    temperature: float = 1.0,  # Temperature for Gumbel-Softmax (lower = more discrete)
+) -> FractalFunction:
+    """
+    Creates a fractal function through differentiable function composition.
+
+    Args:
+        split_points: List of split points (0-1) for each segment
+        values: Base values for each segment
+        left_children_matrix: Matrix of child logits for left branches [len(values), len(values)]
+        right_children_matrix: Matrix of child logits for right branches [len(values), len(values)]
+        max_depth: Maximum recursion depth
+        smoothing_width: Width of the smoothing transition (0-1)
+        use_argmax: If True, uses deterministic argmax path instead of probabilistic softmax
+        temperature: Temperature parameter for Gumbel-Softmax (lower = more discrete)
+
+    Returns:
+        A composable differentiable function object
+    """
+    # Convert logits to probabilities
+    if use_argmax:
+        # Use Gumbel-Softmax with hard=True for straight-through gradient
+        left_children_probs = torch.nn.functional.gumbel_softmax(
+            left_children_matrix,
+            tau=temperature,
+            hard=True,  # This enables the straight-through gradient
+            dim=1
+        )
+        right_children_probs = torch.nn.functional.gumbel_softmax(
+            right_children_matrix,
+            tau=temperature,
+            hard=True,
+            dim=1
+        )
+    else:
+        # Regular softmax
+        left_children_probs = torch.nn.functional.softmax(left_children_matrix, dim=1)
+        right_children_probs = torch.nn.functional.softmax(right_children_matrix, dim=1)
+
+    # Function cache to prevent exponential explosion
+    function_cache = {}
+
+    def build_function(
+        depth: int,
+        start: float,
+        end: float,
+        parent_idx: int,
+    ) -> FractalFunction:
+        """Recursively build the fractal function for range [start, end]"""
+        # Use memoization to avoid exponential explosion
+        cache_key = (depth, start, end, parent_idx)
+        if cache_key in function_cache:
+            return function_cache[cache_key]
+
+        value = values[parent_idx]
+
+        # Base case - maximum depth reached
+        if depth == max_depth:
+            result = ConstantFunction(value)
+            function_cache[cache_key] = result
+            return result
+
+        # Calculate split position in absolute coordinates
+        split = split_points[parent_idx % len(split_points)]
+        mid = start + split * (end - start)
+
+        # Create transition function with width that scales with segment size
+        segment_size = end - start
+        trans_width = smoothing_width * segment_size
+        transition = SigmoidFunction(mid, trans_width)
+
+        # Get the probabilities for this parent
+        left_probs = left_children_probs[parent_idx]
+        right_probs = right_children_probs[parent_idx]
+
+        # Create weighted left branch (blend of all possible children)
+        left_branches = []
+        for i, prob in enumerate(left_probs):
+            if prob > 1e-5:  # Skip negligible contributions
+                child_func = build_function(depth + 1, start, mid, i)
+                left_branches.append((prob, child_func))
+
+        # Create weighted right branch (blend of all possible children)
+        right_branches = []
+        for i, prob in enumerate(right_probs):
+            if prob > 1e-5:  # Skip negligible contributions
+                child_func = build_function(depth + 1, mid, end, i)
+                right_branches.append((prob, child_func))
+
+        # Combine left branches with weighted blending
+        if not left_branches:
+            left_func = ConstantFunction(values[0])
+        else:
+            # Sort by weight descending to blend most significant first
+            left_branches.sort(key=lambda x: x[0], reverse=True)
+            left_func = left_branches[0][1]
+            total_weight = left_branches[0][0]
+
+            # Incrementally blend the functions with proper weighting
+            for weight, func in left_branches[1:]:
+                # Calculate relative weight for this blend
+                blend_weight = weight / (total_weight + weight)
+                weight_func = ConstantFunction(blend_weight)
+                left_func = BlendedFunction(left_func, func, weight_func, depth)
+                total_weight = total_weight + weight
+
+        # Repeat for right branches
+        if not right_branches:
+            right_func = ConstantFunction(values[0])
+        else:
+            right_branches.sort(key=lambda x: x[0], reverse=True)
+            right_func = right_branches[0][1]
+            total_weight = right_branches[0][0]
+
+            for weight, func in right_branches[1:]:
+                blend_weight = weight / (total_weight + weight)
+                weight_func = ConstantFunction(blend_weight)
+                right_func = BlendedFunction(right_func, func, weight_func, depth)
+                total_weight = total_weight + weight
+
+        # Create final blended function
+        result = BlendedFunction(left_func, right_func, transition, depth)
+        function_cache[cache_key] = result
+        return result
+
+    # Create the full function with domain restriction
+    fractal_func = build_function(depth=0, start=0.0, end=1.0, parent_idx=0)
+
+    # Create wrapper with domain restriction
+    class DomainRestrictedFractal(FractalFunction):
+        def __init__(self, func: FractalFunction):
+            self.func = func
+            # Store parameters to allow gradient flow
+            self.left_children_matrix = left_children_matrix
+            self.right_children_matrix = right_children_matrix
+            self.split_points = split_points
+            self.values = values
+            self.use_argmax = use_argmax
+            self.temperature = temperature
+
+        def __call__(self, x: torch.Tensor) -> torch.Tensor:
+            x_clipped = torch.clamp(x, 0.0, 1.0)
+            return self.func(x_clipped)
+
+        def __repr__(self) -> str:
+            return f"f(x) = {self.func}"
+
+    return DomainRestrictedFractal(fractal_func)
+```
+
+### Benefits of using Gumbel-Softmax with hard=True:
+
+1. **Simpler code**: The implementation is much cleaner and doesn't require the manual straight-through trick.
+
+2. **Temperature control**: You get a temperature parameter that lets you control how close to a true one-hot the distribution is. Lower temperature makes it more discrete.
+
+3. **Numerically stable**: The Gumbel-Softmax implementation in PyTorch is optimized and numerically stable.
+
+4. **Conceptually cleaner**: Instead of mixing and matching detached tensors, the approach is more principled.
+
+### How it works:
+
+When `hard=True`, Gumbel-Softmax does exactly what we implemented manually:
+1. During forward pass: Uses hard one-hot samples (argmax)
+2. During backward pass: Uses softmax gradients
+
+The PyTorch implementation essentially does:
+```python
+# Simplified version of how PyTorch implements hard=True
+y_soft = torch.softmax((logits + gumbel_noise) / temperature, dim=1)
+index = y_soft.max(dim=1)[1]
+y_hard = torch.zeros_like(y_soft).scatter_(1, index.unsqueeze(1), 1.0)
+result = y_hard - y_soft.detach() + y_soft
+```
+
+Which is the straight-through estimator we implemented manually, but with the addition of Gumbel noise for better sampling properties.
+
+Using Gumbel-Softmax is definitely the way to go for this application. Great suggestion!
+
+## USER:
+
+That didn't work at all, loss just keeps increasing.
+
+This is what I have:
+
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/simple.py</ai-context>
+
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/train1d.py</ai-context>
+
+
+Don't give me a full code listing, just the things I need to fix
+
+## ASSISTANT:
+
+Let's focus on the key issues:
+
+1. **The main problem**: Training with Gumbel-Softmax doesn't work because:
+   - Hard samples in forward pass can be inconsistent/noisy during training
+   - Temperature may be too low (0.5), causing extreme/unstable gradients
+
+2. **Fix the training approach**:
+
+```python
+# Inside optimize_fractal_function:
+
+# Use softmax during training, argmax for evaluation:
+fractal_func = generate_fractal_function(
+    split_points=split_points.tolist(),
+    values=values.tolist(),
+    left_children_matrix=left_matrix,
+    right_children_matrix=right_matrix,
+    max_depth=max_depth,
+    smoothing_width=smoothing_width,
+    use_argmax=False,  # ← Use softmax during training
+)
+
+# Later in the plotting section, generate a separate argmax version for evaluation:
+eval_func = generate_fractal_function(
+    split_points=split_points.tolist(),
+    values=values.tolist(),
+    left_children_matrix=left_matrix,
+    right_children_matrix=right_matrix,
+    max_depth=max_depth,
+    smoothing_width=smoothing_width,
+    use_argmax=True,  # ← Use argmax for evaluation
+)
+```
+
+3. **Alternative: Hybrid loss approach**:
+
+```python
+# Add to optimize_fractal_function:
+
+# Create both softmax and argmax functions
+softmax_func = generate_fractal_function(
+    split_points=split_points.tolist(),
+    values=values.tolist(),
+    left_children_matrix=left_matrix,
+    right_children_matrix=right_matrix,
+    max_depth=max_depth,
+    smoothing_width=smoothing_width,
+    use_argmax=False
+)
+
+with torch.no_grad():  # Avoid double gradients
+    argmax_func = generate_fractal_function(
+        split_points=split_points.tolist(),
+        values=values.tolist(),
+        left_children_matrix=left_matrix,
+        right_children_matrix=right_matrix,
+        max_depth=max_depth,
+        smoothing_width=smoothing_width,
+        use_argmax=True
+    )
+
+# Evaluate both functions
+softmax_pred = softmax_func(target_x)
+argmax_pred = argmax_func(target_x)
+
+# Stop gradients from argmax, but connect to parameters
+argmax_pred = argmax_pred.detach() + 0 * softmax_pred.sum() * 0
+
+# Combine losses
+softmax_loss = torch.nn.functional.mse_loss(softmax_pred, target_y)
+argmax_loss = torch.nn.functional.mse_loss(argmax_pred, target_y)
+
+# Set weight (e.g., 0.8 for softmax, 0.2 for argmax)
+loss = 0.8 * softmax_loss + 0.2 * argmax_loss
+```
+
+4. **Modified Gumbel-Softmax approach**:
+
+```python
+# In generate_fractal_function:
+if use_argmax:
+    # Higher temperature makes Gumbel-Softmax more stable
+    temperature = 1.0  # Try 1.0 instead of 0.5
+
+    # You can also add noise annealing over training
+    # temperature = max(0.5, 2.0 * (1.0 - iteration/total_iterations))
+```
+
+Start with the simpler approach (train with softmax, evaluate with argmax). If you want to pursue the Gumbel-Softmax route further, we can explore the advanced approaches with fine-tuned temperature or hybrid losses.
+
+## USER:
+
+Let's take a different approach maybe. Let's add a loss penalty to ensure that the softmax is similar to the max (or entropy or whatever you think is best)
+
+## ASSISTANT:
+
+That's an excellent approach! Adding a loss penalty to encourage low entropy (more peaked softmax distributions) will help align the softmax and argmax behaviors. Here's how to implement it:
+
+```python
+def optimize_fractal_function(
+    target_y: torch.Tensor,
+    target_x: torch.Tensor | None = None,
+    num_values: int = 3,
+    max_depth: int = 4,
+    num_iterations: int = 2000,
+    learning_rate: float = 0.01,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    smoothing_width: float = 0.1,
+    plot_every_n: int = 50,
+    entropy_penalty: float = 0.1,  # Weight for the entropy penalty
+    show_progress: bool = True,
+) -> tuple[FractalFunction, dict]:
+    # ... [existing setup code] ...
+
+    # Add tracking for entropy loss
+    history["entropy_loss"] = []
+
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+
+        # Apply constraints to parameters
+        split_points = torch.sigmoid(split_points_param) * 0.8 + 0.1
+        values = torch.clamp(values_param, 1.0, 5.0)
+
+        # Get softmax probabilities for both matrices
+        left_probs = torch.nn.functional.softmax(left_matrix, dim=1)
+        right_probs = torch.nn.functional.softmax(right_matrix, dim=1)
+
+        # Calculate entropy of the distributions
+        left_entropy = -torch.sum(left_probs * torch.log(left_probs + 1e-10), dim=1).mean()
+        right_entropy = -torch.sum(right_probs * torch.log(right_probs + 1e-10), dim=1).mean()
+
+        # Total entropy loss
+        entropy_loss = (left_entropy + right_entropy) / 2.0
+
+        # Create fractal function
+        fractal_func = generate_fractal_function(
+            split_points=split_points.tolist(),
+            values=values.tolist(),
+            left_children_matrix=left_matrix,
+            right_children_matrix=right_matrix,
+            max_depth=max_depth,
+            smoothing_width=smoothing_width,
+            use_argmax=False,  # Use softmax during training
+        )
+
+        # Evaluate function at the target x points
+        predicted_y = fractal_func(target_x)
+
+        # Calculate reconstruction loss (MSE)
+        recon_loss = torch.nn.functional.mse_loss(predicted_y, target_y)
+
+        # Add diversity regularization
+        value_diversity_loss = -torch.std(values) * 0.01
+
+        # Combine all loss components
+        total_loss = recon_loss + value_diversity_loss + entropy_penalty * entropy_loss
+
+        # Backward and optimize
+        total_loss.backward()
+        optimizer.step()
+
+        # Save history
+        history["loss"].append(recon_loss.item())
+        history["entropy_loss"].append(entropy_loss.item())
+
+        # ... [rest of the function] ...
+```
+
+For the plot_optimization_live function, let's add a panel to visualize the entropy loss:
+
+```python
+def plot_optimization_live(
+    iteration: int,
+    loss_history: list,
+    entropy_loss_history: list,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    eval_x: np.ndarray,
+    current_y: np.ndarray,
+    eval_y: np.ndarray,
+    split_points: np.ndarray,
+    values: np.ndarray,
+):
+    fig, axs = plt.subplots(3, 1, figsize=(6, 8))
+    fig.tight_layout(pad=3.0)
+
+    # Plot main loss history
+    axs[0].plot(loss_history, label="Reconstruction Loss")
+    axs[0].set_title(f"Loss (Iteration {iteration})")
+    axs[0].set_xlabel("Iteration")
+    axs[0].set_ylabel("MSE Loss")
+    axs[0].set_yscale("log")
+    axs[0].grid(True)
+
+    # Add entropy loss subplot
+    ax_entropy = axs[0].twinx()
+    ax_entropy.plot(entropy_loss_history, color='orange', linestyle='--', label="Entropy Loss")
+    ax_entropy.set_ylabel("Entropy Loss", color='orange')
+    ax_entropy.tick_params(axis='y', labelcolor='orange')
+
+    # Combine legends
+    lines1, labels1 = axs[0].get_legend_handles_labels()
+    lines2, labels2 = ax_entropy.get_legend_handles_labels()
+    axs[0].legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+
+    # Plot current fit vs target (softmax version)
+    axs[1].scatter(target_x, target_y, alpha=0.7, label="Target Points", color="black")
+    axs[1].plot(eval_x, current_y, label="Softmax Fit", color="blue", linewidth=2)
+
+    # Mark split points and values
+    for i, (sp, val) in enumerate(zip(split_points, values)):
+        axs[1].axvline(x=sp, linestyle="--", alpha=0.3, color="gray")
+        axs[1].text(sp, 1.0, f"{sp:.2f}", ha="center", va="bottom", alpha=0.7)
+        axs[1].text(0.05, val, f"v{i}={val:.2f}", ha="left", va="center", alpha=0.7)
+
+    axs[1].set_title("Target vs. Softmax Fit")
+    axs[1].set_xlabel("x")
+    axs[1].set_ylabel("y")
+    axs[1].grid(True)
+    axs[1].legend()
+
+    # Plot argmax version
+    axs[2].scatter(target_x, target_y, alpha=0.7, label="Target Points", color="black")
+    axs[2].plot(eval_x, eval_y, label="Argmax Fit", color="red", linewidth=2)
+    axs[2].set_title("Target vs. Argmax Fit")
+    axs[2].set_xlabel("x")
+    axs[2].set_ylabel("y")
+    axs[2].grid(True)
+    axs[2].legend()
+
+    plt.tight_layout()
+    plt.show()
+```
+
+Alternatives to entropy penalty:
+
+1. **Gumbel-Softmax with annealed temperature**:
+```python
+# Annealing schedule for temperature
+temperature = max(0.5, 2.0 * (1.0 - i/num_iterations))
+
+# Use Gumbel-Softmax with annealed temperature
+gumbel_left_probs = torch.nn.functional.gumbel_softmax(
+    left_matrix, tau=temperature, hard=False, dim=1
+)
+gumbel_right_probs = torch.nn.functional.gumbel_softmax(
+    right_matrix, tau=temperature, hard=False, dim=1
+)
+
+# Calculate distance to one-hot
+left_max_probs, _ = gumbel_left_probs.max(dim=1, keepdim=True)
+right_max_probs, _ = gumbel_right_probs.max(dim=1, keepdim=True)
+one_hot_distance = (
+    (left_max_probs - gumbel_left_probs).abs().mean() +
+    (right_max_probs - gumbel_right_probs).abs().mean()
+)
+```
+
+2. **L2 distance between softmax and one-hot**:
+```python
+# Get softmax probabilities
+left_probs = torch.nn.functional.softmax(left_matrix, dim=1)
+right_probs = torch.nn.functional.softmax(right_matrix, dim=1)
+
+# Get argmax indices and create one-hot vectors
+left_indices = torch.argmax(left_matrix, dim=1)
+right_indices = torch.argmax(right_matrix, dim=1)
+left_one_hot = torch.nn.functional.one_hot(left_indices, num_values).float()
+right_one_hot = torch.nn.functional.one_hot(right_indices, num_values).float()
+
+# Calculate L2 distance
+softmax_onehot_distance = (
+    torch.norm(left_probs - left_one_hot, p=2, dim=1).mean() +
+    torch.norm(right_probs - right_one_hot, p=2, dim=1).mean()
+)
+```
+
+3. **Kurtosis reward** (encourage peakedness):
+```python
+# Get softmax probabilities
+left_probs = torch.nn.functional.softmax(left_matrix, dim=1)
+right_probs = torch.nn.functional.softmax(right_matrix, dim=1)
+
+# Calculate kurtosis (high kurtosis = more peaked)
+left_kurtosis = ((left_probs - left_probs.mean(dim=1, keepdim=True))**4).mean(dim=1) / \
+                ((left_probs - left_probs.mean(dim=1, keepdim=True))**2).mean(dim=1)**2
+right_kurtosis = ((right_probs - right_probs.mean(dim=1, keepdim=True))**4).mean(dim=1) / \
+                 ((right_probs - right_probs.mean(dim=1, keepdim=True))**2).mean(dim=1)**2
+
+# Reward high kurtosis
+kurtosis_reward = -(left_kurtosis.mean() + right_kurtosis.mean())
+```
+
+I recommend starting with the entropy penalty approach as it's the most straightforward and effective for this purpose.
+
+## USER:
+
+in plot_optimization_live plot recon loss and entropy loss on same scale
+
+## ASSISTANT:
+
+Let's modify the `plot_optimization_live` function to plot both reconstruction loss and entropy loss on the same scale for better comparison:
+
+```python
+def plot_optimization_live(
+    iteration: int,
+    loss_history: list,
+    entropy_loss_history: list,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    eval_x: np.ndarray,
+    current_y: np.ndarray,
+    eval_y: np.ndarray,
+    split_points: np.ndarray,
+    values: np.ndarray,
+):
+    """Update the live plot with current optimization state"""
+    # Create figure with subplots
+    fig, axs = plt.subplots(3, 1, figsize=(10, 12))
+    fig.tight_layout(pad=3.0)
+
+    # Plot both losses on the same scale in the first subplot
+    axs[0].plot(loss_history, label="Reconstruction Loss", color='blue')
+    axs[0].plot(entropy_loss_history, label="Entropy Loss", color='orange', linestyle='--')
+    axs[0].set_title(f"Losses (Iteration {iteration})")
+    axs[0].set_xlabel("Iteration")
+    axs[0].set_ylabel("Loss Value")
+    axs[0].set_yscale("log")  # Use log scale to handle different magnitudes
+    axs[0].grid(True)
+    axs[0].legend()
+
+    # Plot current fit vs target (softmax version)
+    axs[1].scatter(target_x, target_y, alpha=0.7, label="Target Points", color="black")
+    axs[1].plot(eval_x, current_y, label="Softmax Fit", color="blue", linewidth=2)
+
+    # Mark split points and values
+    for i, (sp, val) in enumerate(zip(split_points, values)):
+        axs[1].axvline(x=sp, linestyle="--", alpha=0.3, color="gray")
+        axs[1].text(sp, 1.0, f"{sp:.2f}", ha="center", va="bottom", alpha=0.7)
+        axs[1].text(0.05, val, f"v{i}={val:.2f}", ha="left", va="center", alpha=0.7)
+
+    axs[1].set_title("Target vs. Softmax Fit")
+    axs[1].set_xlabel("x")
+    axs[1].set_ylabel("y")
+    axs[1].grid(True)
+    axs[1].legend()
+
+    # Plot argmax version
+    axs[2].scatter(target_x, target_y, alpha=0.7, label="Target Points", color="black")
+    axs[2].plot(eval_x, eval_y, label="Argmax Fit", color="red", linewidth=2)
+    axs[2].set_title("Target vs. Argmax Fit")
+    axs[2].set_xlabel("x")
+    axs[2].set_ylabel("y")
+    axs[2].grid(True)
+    axs[2].legend()
+
+    plt.tight_layout()
+    plt.show()
+```
+
+This change will plot both losses on the same subplot with the same y-axis scale (using log scale), making it easier to compare their relative values and behavior over time. The log scale helps to visualize both losses even if they have different magnitudes.
+
+If you prefer to see them on a linear scale instead, simply remove the `axs[0].set_yscale("log")` line.
+
+## USER:
+
+make a new create_sample_target_curve that returns a sin wave with values from 1 to 5, with same width between points
+
+## ASSISTANT:
+
+Here's a new `create_sample_target_curve` function that generates a clean sine wave with values ranging from 1 to 5, using evenly spaced points:
+
+```python
+def create_sample_target_curve(num_points=100, include_noise=False, noise_level=0.05):
+    """
+    Create a sample sine wave target curve with values from 1 to 5.
+
+    Args:
+        num_points: Number of sample points to generate
+        include_noise: Whether to add noise to the signal
+        noise_level: Standard deviation of noise as a fraction of signal amplitude
+
+    Returns:
+        Tuple of (x_values, y_values) as torch tensors
+    """
+    # Create evenly spaced x values from 0 to 1
+    x_values = torch.linspace(0, 1, num_points)
+
+    # Create a sine wave with multiple frequencies
+    # Scale it to range [1, 5]
+    base_signal = (
+        torch.sin(x_values * 2 * np.pi) * 0.8 +                # Main frequency
+        torch.sin(x_values * 6 * np.pi) * 0.3 +                # Higher frequency component
+        torch.sin(x_values * 1 * np.pi + 0.5) * 0.2            # Lower frequency with phase shift
+    )
+
+    # Normalize to [-1, 1]
+    base_signal = base_signal / base_signal.abs().max()
+
+    # Scale to [1, 5]
+    y_values = base_signal * 2.0 + 3.0
+
+    # Add noise if requested
+    if include_noise:
+        amplitude = 4.0  # Range max - min
+        noise = torch.randn(num_points) * (amplitude * noise_level)
+        y_values = y_values + noise
+
+        # Ensure values stay in [1, 5] range after noise
+        y_values = torch.clamp(y_values, 1.0, 5.0)
+
+    return x_values, y_values
+
+
+# Example usage in demo function
+def demo_optimization():
+    # Create a sine wave target curve
+    target_x, target_y = create_sample_target_curve(
+        num_points=100,
+        include_noise=True,   # Set to False for clean sine wave
+        noise_level=0.05
+    )
+
+    # Optimize a fractal function
+    optimized_func, history, *_ = optimize_fractal_function(
+        target_y=target_y,
+        target_x=target_x,
+        num_values=5,  # Number of base values
+        max_depth=4,   # Recursion depth
+        num_iterations=1000,
+        learning_rate=0.01,
+        plot_every_n=20,  # Plot every 20 iterations
+        entropy_penalty=0.1,  # Weight for entropy penalty
+        show_progress=True
+    )
+
+    # Plot final results
+    fig = plot_optimization_results(
+        history,
+        show_iterations=[0, 100, 200, 500]  # Show some intermediate results
+    )
+
+    return optimized_func, history, fig
+```
+
+This function:
+
+1. Creates evenly spaced x values from 0 to 1
+2. Generates a sine wave with multiple frequency components for more interesting patterns
+3. Scales the values to range from 1 to 5
+4. Optionally adds controllable noise
+5. Ensures values stay within the valid range
+
+You can adjust the frequencies and weights to create different patterns, or set `include_noise=False` to get a perfectly clean sine wave for easier debugging.
+
+The sine wave with multiple frequencies will provide a good test case that has both smooth features and more complex variation patterns to approximate.
+
+## USER:

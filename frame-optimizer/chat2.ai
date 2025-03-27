@@ -1,0 +1,81 @@
+## SYSTEM:
+
+Remember the vqgan-clip / clip-guided-diffusion models from ~2021?
+
+Great! I want to do something similar with siglip and html frames :)
+
+Here's how to use siglip:
+
+```python
+import torch
+from transformers import AutoModel, AutoProcessor
+from transformers.image_utils import load_image
+
+ckpt = "google/siglip2-base-patch16-224"
+model = AutoModel.from_pretrained(ckpt, device_map="auto").eval()
+processor = AutoProcessor.from_pretrained(ckpt)
+
+image = load_image("https://huggingface.co/datasets/merve/coco/resolve/main/val2017/000000000285.jpg")
+inputs = processor(images=[image], return_tensors="pt").to(model.device)
+
+with torch.no_grad():
+    image_embeddings = model.get_image_features(**inputs)
+
+print(image_embeddings.shape) # torch.Size([1, 1152])
+```
+
+For the frames, I want to do a modern version of my own personal website. It uses frames in frames recursively in a kind of fractal pattern.
+
+```html
+
+<html>
+  <head><title>Andreas Jansson's personal web page</title>
+    <meta http-equiv="refresh" content="15; 3.html" />
+  </head>
+    <frameset cols="30%,70%">
+      <frame src="_0.html" scrolling="no">
+      <frame src="0_.html" scrolling="no">
+    </frameset>
+</html>
+
+```
+
+where _0.html is
+``` html
+<html style="background: pink">
+  <head><title>Andreas Jansson's personal web page</title>
+    <meta http-equiv="refresh" content="0.4;_1.html" />
+  </head>
+</html>
+```
+
+etc.
+
+I want to optimize the frames so that they form a pattern from text (e.g. "a flower").
+
+To do that, the optimization should create n different frames of two types: parent frames and leaf frames. Each parent frame is split either horizontally or vertically (alternate horizontal and vertical split). A leaf frame has a single background color. The leaf frame color is a parameter to optimize.
+
+In parent frames, the split point is a parameter to optimize. As are the child frames in each of the two halves. Pick the child frame using softmax over all possible frames.
+
+Note that there is inherent fractal-like recursion here, where a frame may pick a distant parent of itself as a child. That's what makes this interesting!
+
+To calculate the loss, first you need to simulate the full fractal-like generation into a 3d tensor where each point is a color. Then compute the siglip embedding of that generated image and compare it to the prompt.
+
+When you're writing code:
+* If you write Python, use mypy annotations. Use modern syntax, like list[str] instead of List[str] and str | int instead of Union.
+* Make the code readable -- break things into functions that are debuggable and can be easily unit tested.
+* Don't overuse comments, no need to comment every line. Only comment things that are not obvious from reading the code.
+* When returning code, only return the relevant parts unless the entire code is required to be rewritten
+
+This is what I have so far:
+
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/optimize.py</ai-context>
+
+
+## USER:
+
+The FractalFrameGenerator is hard to differentiate, especially if I wanted to make split_ratios differentiable as well.
+
+In render_frame, instead of directly rendering the raster, could you have each recursive call return a differentiable function that can then be composed recursively and finally applied to the raster?
+
+Like if this was a 1D problem instead of a 2D image problem, you could imagine a

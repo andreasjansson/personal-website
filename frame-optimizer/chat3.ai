@@ -1,0 +1,363 @@
+## SYSTEM:
+
+I want to do a modern version of my own personal website. My current website uses frames in frames recursively in a kind of fractal pattern (animation without css or js -- wow! fractals -- wow!).
+
+```html
+
+<html>
+  <head><title>Andreas Jansson's personal web page</title>
+    <meta http-equiv="refresh" content="15; 3.html" />
+  </head>
+    <frameset cols="30%,70%">
+      <frame src="_0.html" scrolling="no">
+      <frame src="0_.html" scrolling="no">
+    </frameset>
+</html>
+
+```
+
+where _0.html is
+``` html
+<html style="background: pink">
+  <head><title>Andreas Jansson's personal web page</title>
+    <meta http-equiv="refresh" content="0.4;_1.html" />
+  </head>
+</html>
+```
+
+etc.
+
+I want to optimize the frames so that they resemble a target image.
+
+To do that, the optimization should create n frames. Each frame has a background color and a split point. Every other frame is split horizontally and vertically. For each of the two splits, it recursively selects one of the frames (perhaps itself) to insert as a child.
+
+Note that there is inherent fractal-like recursion here, where a frame may pick a distant parent of itself as a child. That's what makes this interesting!
+
+During optimization, different images are created at different depths of recursion. If max-depth is reached, the frame just returns its background color in the given size of the current subframe.
+
+The loss is a weighted average of comparing an image at _every_ recursion depth to the target image, with MSE loss. The weighting prefers later recursion depths (e.g. if the max depth is 10, then the image at depth 10 has 10x the weighting of an image at depth 1). The reason for comparing images at every recursion depth is so that the image starts to resemble the target soon, as I intend to insert the child frames after a delay of a second.
+
+## USER:
+
+This is what I have so far:
+
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/cmaes.py</ai-context>
+
+It's not getting close to my target image if I use a real image, even when popsize is 100.
+
+Perhaps cma es isn't well suited to this problem. Can you think of some other solution, like simulated annealing or bayesian optimization (BO)?
+
+Can you make a new optimize_se function using simulated annealling that uses all other existing functions?
+
+## ASSISTANT:
+
+I see the challenge. CMA-ES might not be exploring the complex parameter space effectively for this problem. Let's implement a simulated annealing approach which can sometimes navigate rugged optimization landscapes better than CMA-ES.
+
+Here's an implementation of `optimize_sa` using simulated annealing:
+
+```python
+def optimize_sa(
+    target: Image.Image,
+    n=5,
+    max_depth=5,
+    width=224,
+    height=224,
+    iterations=1000,
+    initial_temp=1.0,
+    cooling_rate=0.99,
+):
+    """
+    Optimize fractal frames to match a target image using simulated annealing.
+
+    Args:
+        target: PIL Image or str (path to image)
+        n: Number of frames
+        max_depth: Maximum recursion depth
+        width, height: Output image size
+        iterations: Number of iterations
+        initial_temp: Initial temperature for SA
+        cooling_rate: Cooling rate for temperature
+
+    Returns:
+        np.ndarray: Optimized frame params
+    """
+    # Convert target to tensor
+    if isinstance(target, str):
+        target = Image.open(target).resize((width, height))
+    target_tensor = torch.tensor(np.array(target), dtype=torch.float32).to(device) / 255.0
+
+    # Initial solution
+    current_params = get_initial_params(n=n)
+    current_frames = params_to_frames(current_params)
+
+    # Evaluate initial solution
+    current_img = render_frame(0, current_frames, 0, max_depth, width, height)
+    current_error = torch.mean((current_img - target_tensor) ** 2).item()
+
+    # Track best solution
+    best_params = current_params.copy()
+    best_error = current_error
+    best_frames = current_frames.clone()
+
+    # Simulated annealing params
+    temp = initial_temp
+
+    # Progress tracking
+    last_improvement = 0
+
+    # Main optimization loop
+    for iteration in range(iterations):
+        # Create neighboring solution with random perturbation
+        neighbor_params = current_params.copy()
+
+        # Randomly select which parameter to modify
+        param_idx = np.random.randint(0, len(neighbor_params))
+
+        # Perturb the parameter
+        if param_idx % 6 < 3:  # RGB values
+            # Color perturbation (smaller for colors)
+            perturbation = np.random.normal(0, 0.1)
+            neighbor_params[param_idx] = np.clip(neighbor_params[param_idx] + perturbation, 0, 1)
+        elif param_idx % 6 == 3:  # Split point
+            # Split point perturbation
+            perturbation = np.random.normal(0, 0.1)
+            neighbor_params[param_idx] = np.clip(neighbor_params[param_idx] + perturbation, 0, 1)
+        else:  # Frame indices
+            # For indices, sometimes just pick a completely new random frame
+            if np.random.random() < 0.5:
+                neighbor_params[param_idx] = np.random.random()
+            else:
+                # Small adjustment
+                perturbation = np.random.normal(0, 0.1)
+                neighbor_params[param_idx] = np.clip(neighbor_params[param_idx] + perturbation, 0, 1)
+
+        # Evaluate neighbor
+        neighbor_frames = params_to_frames(neighbor_params)
+        neighbor_img = render_frame(0, neighbor_frames, 0, max_depth, width, height)
+        neighbor_error = torch.mean((neighbor_img - target_tensor) ** 2).item()
+
+        # Decide whether to accept the new solution
+        if neighbor_error < current_error:
+            # Always accept better solutions
+            current_params = neighbor_params
+            current_error = neighbor_error
+            current_frames = neighbor_frames
+
+            # Update best solution if this is better
+            if neighbor_error < best_error:
+                best_error = neighbor_error
+                best_params = neighbor_params.copy()
+                best_frames = neighbor_frames.clone()
+                last_improvement = iteration
+        else:
+            # Accept worse solutions with a probability that decreases with temperature
+            p = np.exp((current_error - neighbor_error) / temp)
+            if np.random.random() < p:
+                current_params = neighbor_params
+                current_error = neighbor_error
+                current_frames = neighbor_frames
+
+        # Cool down temperature
+        temp *= cooling_rate
+
+        # Visualization update every 20 iterations
+        if iteration % 20 == 0 or iteration == iterations - 1:
+            visualize_grid(
+                frames=best_frames,
+                target=target,
+                max_depth=max_depth,
+                n=n,
+                iteration=iteration,
+                best_fitness=best_error,
+            )
+            print(f"Iteration {iteration}, Temperature: {temp:.6f}, Best error: {best_error:.6f}")
+
+        # Optional: adaptive restart if no improvement for a while
+        if iteration - last_improvement > 200:
+            print("Restarting search...")
+            temp = initial_temp * 0.5  # Reduce initial temp for restart
+            # Partially randomize current solution but keep some parts of the best
+            mix_ratio = 0.7
+            random_params = get_initial_params(n=n)
+            current_params = mix_ratio * best_params + (1 - mix_ratio) * random_params
+            current_frames = params_to_frames(current_params)
+            current_img = render_frame(0, current_frames, 0, max_depth, width, height)
+            current_error = torch.mean((current_img - target_tensor) ** 2).item()
+            last_improvement = iteration
+
+    return best_params
+```
+
+Let's also add a modified objective function that does a weighted depth comparison for simulated annealing:
+
+```python
+def evaluate_frames_with_depth_weighting(
+    frames: torch.Tensor,
+    target_tensor: torch.Tensor,
+    max_depth: int,
+    width: int,
+    height: int,
+):
+    """Evaluate frames with weighted depth comparison"""
+    total_loss = 0
+    total_weight = sum(d + 1 for d in range(1, max_depth + 1))
+
+    for d in range(1, max_depth + 1):
+        weight = d
+        img = render_frame(0, frames, 0, d, width, height)
+        mse = torch.mean((img - target_tensor) ** 2)
+        total_loss += weight * mse.item()
+
+    return total_loss / total_weight
+```
+
+And here's a stochastic hill climbing approach which can sometimes work well for problems like this:
+
+```python
+def optimize_hill_climbing(
+    target: Image.Image,
+    n=5,
+    max_depth=5,
+    width=224,
+    height=224,
+    iterations=1000,
+    max_tries_per_iteration=10,
+):
+    """
+    Optimize fractal frames using stochastic hill climbing.
+
+    Args:
+        target: PIL Image or str (path to image)
+        n: Number of frames
+        max_depth: Maximum recursion depth
+        width, height: Output image size
+        iterations: Number of iterations
+        max_tries_per_iteration: Maximum number of neighbor attempts per iteration
+
+    Returns:
+        np.ndarray: Optimized frame params
+    """
+    # Convert target to tensor
+    if isinstance(target, str):
+        target = Image.open(target).resize((width, height))
+    target_tensor = torch.tensor(np.array(target), dtype=torch.float32).to(device) / 255.0
+
+    # Initial solution
+    current_params = get_initial_params(n=n)
+    current_frames = params_to_frames(current_params)
+
+    # Evaluate initial solution
+    current_error = evaluate_frames_with_depth_weighting(
+        current_frames, target_tensor, max_depth, width, height
+    )
+
+    # Track best solution
+    best_params = current_params.copy()
+    best_error = current_error
+    best_frames = current_frames.clone()
+
+    # Number of iterations without improvement
+    stagnation_count = 0
+    adaptive_step_size = 0.1
+
+    # Main optimization loop
+    for iteration in range(iterations):
+        found_better = False
+
+        # Try multiple neighbors and select the best one
+        for _ in range(max_tries_per_iteration):
+            # Create neighboring solution with random perturbation
+            neighbor_params = current_params.copy()
+
+            # Apply perturbations to multiple parameters with adaptive step size
+            num_params_to_perturb = max(1, int(len(neighbor_params) * 0.1))  # Perturb 10% of parameters
+            param_indices = np.random.choice(len(neighbor_params), num_params_to_perturb, replace=False)
+
+            for param_idx in param_indices:
+                if param_idx % 6 < 3:  # RGB values
+                    perturbation = np.random.normal(0, adaptive_step_size)
+                    neighbor_params[param_idx] = np.clip(neighbor_params[param_idx] + perturbation, 0, 1)
+                elif param_idx % 6 == 3:  # Split point
+                    perturbation = np.random.normal(0, adaptive_step_size)
+                    neighbor_params[param_idx] = np.clip(neighbor_params[param_idx] + perturbation, 0, 1)
+                else:  # Frame indices
+                    # For indices, sometimes just pick a completely new random frame
+                    if np.random.random() < 0.3:
+                        neighbor_params[param_idx] = np.random.random()
+                    else:
+                        perturbation = np.random.normal(0, adaptive_step_size)
+                        neighbor_params[param_idx] = np.clip(neighbor_params[param_idx] + perturbation, 0, 1)
+
+            # Evaluate neighbor
+            neighbor_frames = params_to_frames(neighbor_params)
+            neighbor_error = evaluate_frames_with_depth_weighting(
+                neighbor_frames, target_tensor, max_depth, width, height
+            )
+
+            # Accept if better
+            if neighbor_error < current_error:
+                current_params = neighbor_params
+                current_error = neighbor_error
+                current_frames = neighbor_frames
+                found_better = True
+
+                # Update best if this is better
+                if neighbor_error < best_error:
+                    best_error = neighbor_error
+                    best_params = neighbor_params.copy()
+                    best_frames = neighbor_frames.clone()
+                    stagnation_count = 0
+                break  # Found a better solution, move on to next iteration
+
+        # If no better neighbor found, increment stagnation count
+        if not found_better:
+            stagnation_count += 1
+
+        # Adjust step size based on progress
+        if stagnation_count > 10:
+            if adaptive_step_size < 0.5:
+                adaptive_step_size *= 1.5  # Increase step size to explore more
+                print(f"Increasing step size to {adaptive_step_size}")
+            stagnation_count = 0
+        elif found_better and iteration > 100:
+            adaptive_step_size *= 0.95  # Decrease step size to fine-tune
+
+        # Random restart if stuck for too long
+        if stagnation_count > 50:
+            print("Random restart...")
+            # Keep some of the best parameters
+            mix_ratio = 0.5
+            random_params = get_initial_params(n=n)
+            current_params = mix_ratio * best_params + (1 - mix_ratio) * random_params
+            current_frames = params_to_frames(current_params)
+            current_error = evaluate_frames_with_depth_weighting(
+                current_frames, target_tensor, max_depth, width, height
+            )
+            stagnation_count = 0
+            adaptive_step_size = 0.2  # Reset step size
+
+        # Visualization update
+        if iteration % 20 == 0 or iteration == iterations - 1:
+            visualize_grid(
+                frames=best_frames,
+                target=target,
+                max_depth=max_depth,
+                n=n,
+                iteration=iteration,
+                best_fitness=best_error,
+            )
+            print(f"Iteration {iteration}, Step size: {adaptive_step_size:.4f}, Best error: {best_error:.6f}")
+
+    return best_params
+```
+
+Both of these optimization approaches should be more effective than CMA-ES for your fractal frame optimization problem. The key improvements are:
+
+1. Adaptive step sizes that change based on optimization progress
+2. Random restarts when the optimization gets stuck
+3. Focused perturbations that target specific parameters more intelligently
+4. Depth-weighted evaluation that considers the appearance at all recursive depths
+
+Try the hill climbing method first, as it should give better results and is often more efficient for these types of problems with complex, multimodal landscapes.
+
+## USER:

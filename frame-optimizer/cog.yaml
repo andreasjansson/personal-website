@@ -1,0 +1,16 @@
+build:
+  gpu: true
+  python_version: "3.12"
+  python_packages:
+    - "numpy==2.2.3"
+    - "torch==2.5.1"
+    - "pillow==11.1.0"
+    - "git+https://github.com/huggingface/transformers"
+    - "flash_attn==2.7.3"
+    - "accelerate==1.4.0"
+    - "sentencepiece==0.2.0"
+    - "protobuf==6.30.0"
+    - "matplotlib"
+    - "cma==4.0.0"
+
+predict: "predict.py:Predictor"

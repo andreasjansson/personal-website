@@ -1,0 +1,496 @@
+## SYSTEM:
+
+You are a helpful assistant. Be brief, you're talking to an expert.
+
+When you're writing code:
+* If you write Python, use mypy annotations. Use modern syntax, like list[str] instead of List[str] and str | int instead of Union.
+* Make the code readable -- break things into functions that are debuggable and can be easily unit tested.
+* Don't overuse comments, no need to comment every line. Only comment things that are not obvious from reading the code.
+* Don't output entire code listings unless I explicitly ask for it. Full code listings are hard to parse if I'm just interested in a single change.
+
+## USER:
+
+sa.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/sa.py</ai-context>
+
+optimizer.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/optimizer.py</ai-context>
+
+train2d.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/train1d.py</ai-context>
+
+fractal2d_nondiff.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/fractal2d_nondiff.py</ai-context>
+
+give me an alternative implementation using a scheme similar to PPO to optimize the matrix parameters (that's the only parameter i'm modifying)
+
+
+## ASSISTANT:
+
+I'll provide an alternative implementation using a scheme similar to PPO (Proximal Policy Optimization) for optimizing the matrix parameters in your fractal model. Instead of using simulated annealing, we'll implement a reinforcement learning-inspired approach.
+
+Here's an implementation:
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+from typing import Callable, List, Tuple, Dict, Any
+
+class PPOMatrixOptimizer(nn.Module):
+    def __init__(
+        self,
+        matrices_param,
+        num_values: int,
+        num_dupes: int,
+        lr: float = 0.01,
+        clip_ratio: float = 0.2,
+        entropy_coef: float = 0.01,
+        value_coef: float = 0.5,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    ):
+        """
+        PPO-inspired optimizer for matrix parameters.
+
+        Args:
+            matrices_param: The matrix parameter to optimize
+            num_values: Number of distinct values in the fractal
+            num_dupes: Number of duplications
+            lr: Learning rate
+            clip_ratio: PPO clipping parameter
+            entropy_coef: Coefficient for entropy bonus
+            value_coef: Coefficient for value loss
+        """
+        super().__init__()
+        self.matrices_param = matrices_param
+        self.num_values = num_values
+        self.num_dupes = num_dupes
+        self.num_values_with_dupes = num_values * num_dupes
+        self.clip_ratio = clip_ratio
+        self.entropy_coef = entropy_coef
+        self.value_coef = value_coef
+        self.device = device
+
+        # Policy network: predicts probability distribution for matrix entries
+        self.policy_net = nn.Sequential(
+            nn.Linear(self.num_values_with_dupes * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.num_values_with_dupes * 2 * self.num_values_with_dupes)
+        ).to(device)
+
+        # Value network: estimates expected reward for state
+        self.value_net = nn.Sequential(
+            nn.Linear(self.num_values_with_dupes * 2, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        ).to(device)
+
+        # Optimizer for both networks
+        self.optimizer = torch.optim.Adam(
+            list(self.policy_net.parameters()) + list(self.value_net.parameters()),
+            lr=lr
+        )
+
+        # Memory buffers for PPO
+        self.reset_memory()
+
+        # Best performance tracking
+        self.best_loss = float('inf')
+        self.best_matrices = None
+
+    def reset_memory(self):
+        """Reset the memory buffer for a new optimization epoch"""
+        self.memory = {
+            'states': [],
+            'actions': [],
+            'rewards': [],
+            'values': [],
+            'log_probs': [],
+        }
+
+    def get_current_state(self) -> torch.Tensor:
+        """Convert current matrix state to a flattened representation"""
+        # Flatten both matrices into a single vector
+        left_mat = self.matrices_param[0].flatten()
+        right_mat = self.matrices_param[1].flatten()
+        return torch.cat([left_mat, right_mat]).to(self.device)
+
+    def select_action(self, state: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """
+        Select an action (matrix perturbation) based on current policy
+        Returns action dict and log probability
+        """
+        # Forward pass through policy network to get action distributions
+        policy_logits = self.policy_net(state).view(2, self.num_values_with_dupes, self.num_values_with_dupes)
+
+        # Create categorical distributions for each row of both matrices
+        distributions = []
+        for matrix_idx in range(2):  # Left and right matrices
+            for row_idx in range(self.num_values_with_dupes):
+                logits = policy_logits[matrix_idx, row_idx]
+                distributions.append(torch.distributions.Categorical(logits=logits))
+
+        # Sample actions and calculate log probabilities
+        actions = {}
+        log_probs = []
+
+        actions["left_matrix"] = torch.zeros((self.num_values_with_dupes, self.num_values_with_dupes),
+                                           device=self.device)
+        actions["right_matrix"] = torch.zeros((self.num_values_with_dupes, self.num_values_with_dupes),
+                                            device=self.device)
+
+        for row_idx in range(self.num_values_with_dupes):
+            # Sample left matrix row
+            left_dist = distributions[row_idx]
+            left_action = left_dist.sample()
+            log_probs.append(left_dist.log_prob(left_action))
+            actions["left_matrix"][row_idx, left_action] = 1.0
+
+            # Sample right matrix row
+            right_dist = distributions[self.num_values_with_dupes + row_idx]
+            right_action = right_dist.sample()
+            log_probs.append(right_dist.log_prob(right_action))
+            actions["right_matrix"][row_idx, right_action] = 1.0
+
+        # Enforce modulo constraints if needed
+        self._enforce_modulo_constraints(actions)
+
+        # Calculate value estimate
+        value = self.value_net(state)
+
+        return actions, torch.stack(log_probs).sum(), value
+
+    def _enforce_modulo_constraints(self, actions: Dict[str, torch.Tensor]) -> None:
+        """Enforce modulo constraints for matrix transitions"""
+        # Skip if no dupes (no constraints needed)
+        if self.num_dupes <= 1:
+            return
+
+        # For each set of duplicates, enforce matching transitions in modulo space
+        for value_idx in range(self.num_values):
+            for matrix_idx, matrix_name in enumerate(["left_matrix", "right_matrix"]):
+                # Get indices of duplicates for this value
+                dupe_indices = [value_idx + i * self.num_values for i in range(self.num_dupes)]
+
+                # Get the chosen transition for the first duplicate
+                first_dupe = dupe_indices[0]
+                chosen_col = torch.argmax(actions[matrix_name][first_dupe]).item()
+                chosen_value = chosen_col % self.num_values
+
+                # For other duplicates, ensure they transition to matching value modulo num_values
+                for dupe_idx in dupe_indices[1:]:
+                    # Reset row
+                    actions[matrix_name][dupe_idx] = 0.0
+
+                    # Find columns with matching modulo value
+                    matching_cols = [col for col in range(self.num_values_with_dupes)
+                                    if col % self.num_values == chosen_value]
+
+                    # Choose a random matching column
+                    if matching_cols:
+                        chosen_match = matching_cols[torch.randint(0, len(matching_cols), (1,)).item()]
+                        actions[matrix_name][dupe_idx, chosen_match] = 1.0
+
+    def apply_action(self, action: Dict[str, torch.Tensor]) -> None:
+        """Apply the selected action to the matrices parameter"""
+        with torch.no_grad():
+            self.matrices_param[0].copy_(action["left_matrix"])
+            self.matrices_param[1].copy_(action["right_matrix"])
+
+    def store_transition(self, state, action, log_prob, value):
+        """Store transition in memory buffer"""
+        self.memory['states'].append(state)
+        self.memory['actions'].append(action)
+        self.memory['log_probs'].append(log_prob)
+        self.memory['values'].append(value)
+
+    def update_policy(self, final_reward: float) -> float:
+        """Update policy networks using PPO algorithm"""
+        # Compute returns and advantages
+        rewards = [0] * len(self.memory['states'])
+        rewards[-1] = final_reward
+
+        returns = []
+        advantages = []
+        R = rewards[-1]
+
+        for r, v in zip(reversed(rewards), reversed(self.memory['values'])):
+            R = r + 0.99 * R  # Use gamma=0.99
+            returns.insert(0, R)
+            advantages.insert(0, R - v.item())
+
+        # Convert lists to tensors
+        states = torch.stack(self.memory['states'])
+        old_log_probs = torch.stack(self.memory['log_probs'])
+        returns = torch.tensor(returns, device=self.device).unsqueeze(1)
+        advantages = torch.tensor(advantages, device=self.device).unsqueeze(1)
+
+        # PPO update loop
+        for _ in range(5):  # Multiple epochs of PPO updates
+            # Get new action probabilities and values
+            new_values = self.value_net(states)
+
+            # Compute policy loss for each state-action pair
+            policy_loss = 0
+            entropy_loss = 0
+
+            for i, state in enumerate(states):
+                # Get new distribution
+                policy_logits = self.policy_net(state).view(2, self.num_values_with_dupes, self.num_values_with_dupes)
+
+                # Reconstruct action log probs
+                new_log_prob = 0
+                for matrix_idx in range(2):
+                    for row_idx in range(self.num_values_with_dupes):
+                        logits = policy_logits[matrix_idx, row_idx]
+                        dist = torch.distributions.Categorical(logits=logits)
+
+                        # Get the action that was taken
+                        if matrix_idx == 0:
+                            action = torch.argmax(self.memory['actions'][i]["left_matrix"][row_idx]).item()
+                        else:
+                            action = torch.argmax(self.memory['actions'][i]["right_matrix"][row_idx]).item()
+
+                        new_log_prob += dist.log_prob(torch.tensor(action, device=self.device))
+                        entropy_loss -= dist.entropy().mean()
+
+                # Compute ratio and clipped objective
+                ratio = torch.exp(new_log_prob - old_log_probs[i])
+                clipped_ratio = torch.clamp(ratio, 1-self.clip_ratio, 1+self.clip_ratio)
+
+                policy_objective = advantages[i] * ratio
+                clipped_objective = advantages[i] * clipped_ratio
+
+                policy_loss -= torch.min(policy_objective, clipped_objective)
+
+            # Compute value loss
+            value_loss = ((new_values - returns) ** 2).mean()
+
+            # Total loss
+            total_loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
+
+            # Update networks
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            self.optimizer.step()
+
+        # Return the final loss value
+        return total_loss.item()
+
+    def optimize_step(self, eval_fn: Callable) -> float:
+        """
+        Perform one complete optimization step using PPO
+
+        Args:
+            eval_fn: Function that evaluates current matrices and returns reward (negative loss)
+
+        Returns:
+            Current loss value
+        """
+        # Get current state
+        state = self.get_current_state()
+
+        # Select action based on current policy
+        action, log_prob, value = self.select_action(state)
+
+        # Apply action to matrices
+        self.apply_action(action)
+
+        # Evaluate the new configuration
+        loss = eval_fn()
+        reward = -loss.item()  # Convert loss to reward (negative loss)
+
+        # Store the transition
+        self.store_transition(state, action, log_prob, value)
+
+        # Update policy networks
+        update_loss = self.update_policy(reward)
+
+        # Track best performance
+        if loss.item() < self.best_loss:
+            self.best_loss = loss.item()
+            self.best_matrices = {
+                'left': self.matrices_param[0].detach().clone(),
+                'right': self.matrices_param[1].detach().clone()
+            }
+
+        # Reset memory buffer for next iteration
+        self.reset_memory()
+
+        return loss
+
+    def reset_to_best(self):
+        """Reset matrices to the best configuration found so far"""
+        if self.best_matrices is not None:
+            with torch.no_grad():
+                self.matrices_param[0].copy_(self.best_matrices['left'])
+                self.matrices_param[1].copy_(self.best_matrices['right'])
+```
+
+Now, let's modify the `optimizer.py` file to include this PPO-based optimizer:
+
+```python
+# Add to optimizer.py
+from ppo_matrix_optimizer import PPOMatrixOptimizer
+
+class PPOOptimizerPart(OptimizerPart):
+    def __init__(
+        self,
+        model,
+        max_depth: int = 1,
+        weight: float = 1.0,
+        lr: float = 0.01,
+        clip_ratio: float = 0.2,
+        entropy_coef: float = 0.01,
+        value_coef: float = 0.5,
+        iterations_per_reset: int = 100,
+    ):
+        """
+        PPO optimizer for matrix parameters
+
+        Args:
+            model: The fractal model
+            max_depth: The max_depth to use during this optimization part
+            weight: Relative weight for allocating iterations
+            lr: Learning rate for PPO
+            clip_ratio: PPO clipping parameter
+            entropy_coef: Coefficient for entropy bonus
+            value_coef: Coefficient for value loss
+            iterations_per_reset: How often to reset to best policy
+        """
+        self.model = model
+        self.optimizer = None  # Will be initialized in finalize_optimizer
+        self.max_depth = max_depth
+        self.weight = weight
+        self.lr = lr
+        self.clip_ratio = clip_ratio
+        self.entropy_coef = entropy_coef
+        self.value_coef = value_coef
+        self.iterations_per_reset = iterations_per_reset
+        self.iterations = 0
+
+    def finalize_optimizer(self, num_iterations: int):
+        # Initialize the PPO optimizer with the model's matrices_param
+        self.optimizer = PPOMatrixOptimizer(
+            matrices_param=self.model.matrices_param,
+            num_values=self.model.num_values,
+            num_dupes=self.model.num_dupes,
+            lr=self.lr,
+            clip_ratio=self.clip_ratio,
+            entropy_coef=self.entropy_coef,
+            value_coef=self.value_coef,
+            device=self.model.device
+        )
+```
+
+And now, let's modify the `train2d.py` file to use this PPO-based optimizer:
+
+```python
+# In train2d.py, adjust the optimize_fractal_function function:
+
+def optimize_fractal_function(
+    model: Fractal2DNonDiff,
+    max_depth: int,
+    target_image: torch.Tensor,
+    num_iterations: int = 2000,
+    adam_lr: float = 0.01,
+    ppo_lr: float = 0.01,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    plot_every_n: int = 50,
+    show_progress: bool = True,
+) -> Fractal2DNonDiff:
+    target_image = target_image.to(device=device, dtype=torch.long)
+
+    # Define the optimization parts
+    parts = [
+        # Use PPO for optimizing matrices
+        PPOOptimizerPart(
+            model=model,
+            max_depth=max_depth,
+            weight=1.0,
+            lr=ppo_lr,
+            clip_ratio=0.2,
+            entropy_coef=0.01,
+            value_coef=0.5,
+            iterations_per_reset=100,
+        ),
+    ]
+
+    optimizer = Optimizer(parts, num_iterations=num_iterations)
+
+    best_loss = float('inf')
+    best_state = {}
+
+    def compute_loss(predicted_image):
+        return 10 * (1 - (torch.sum(predicted_image == target_image) / len(predicted_image.flatten())))
+
+    def closure():
+        optimizer.zero_grad()
+
+        # Generate the fractal image
+        predicted_image = model(optimizer.max_depth)
+
+        # Compute loss
+        loss = compute_loss(predicted_image)
+
+        return loss
+
+    for i in range(num_iterations):
+        plot_fn = lambda: model.plot_history(
+            depths=[optimizer.max_depth],
+            target_image=target_image,
+        )
+
+        loss = optimizer.step(closure, plot_fn)
+
+        # Track iteration for visualization
+        model.track_iteration(
+            iteration=i,
+            recon_loss=loss,
+        )
+
+        if plot_every_n > 0 and (i % plot_every_n == 0 or i == num_iterations - 1):
+            plot_fn()
+
+        if show_progress and (i % plot_every_n == 0 or i == num_iterations - 1):
+            print(f"Iteration {i}/{num_iterations}, Loss: {loss.item():.6f}, PPO, Max depth: {optimizer.max_depth}")
+
+        # Reset to best policy periodically
+        if i % 100 == 99:
+            ppo_optimizer = optimizer.current_optimizer
+            if hasattr(ppo_optimizer, 'reset_to_best'):
+                ppo_optimizer.reset_to_best()
+                if show_progress:
+                    print(f"Reset to best configuration (Loss: {ppo_optimizer.best_loss:.6f})")
+                    plot_fn()
+
+        # Save best state
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_state = {
+                'matrices_param': model.matrices_param.detach().clone(),
+            }
+
+    # Restore best state at the end
+    model.matrices_param.data.copy_(best_state['matrices_param'])
+
+    return model
+```
+
+Key features of this PPO-based optimization approach:
+
+1. **Policy Network**: Learns a policy that generates probability distributions for matrix entries.
+
+2. **Value Network**: Estimates expected "rewards" (negative loss) to guide the policy updates.
+
+3. **PPO Optimization**: Uses the PPO algorithm with clipping to update the policy in a stable way.
+
+4. **Constraint Enforcement**: Ensures that the modulo constraints between matrix entries are maintained.
+
+5. **Best State Tracking**: Remembers and can revert to the best configuration found so far.
+
+6. **Exploration vs. Exploitation**: The entropy coefficient balances between exploring new configurations and exploiting known good ones.
+
+The key advantage over simulated annealing is that PPO actually learns from past experience rather than just randomly trying configurations. This should lead to more efficient optimization, especially for complex fractal structures.
+
+## USER:

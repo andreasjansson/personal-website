@@ -1,0 +1,789 @@
+## SYSTEM:
+
+You are a helpful assistant. Be brief, you're talking to an expert.
+
+When you're writing code:
+* If you write Python, use mypy annotations. Use modern syntax, like list[str] instead of List[str] and str | int instead of Union.
+* Make the code readable -- break things into functions that are debuggable and can be easily unit tested.
+* Don't overuse comments, no need to comment every line. Only comment things that are not obvious from reading the code.
+* Don't output entire code listings unless I explicitly ask for it. Full code listings are hard to parse if I'm just interested in a single change.
+
+## USER:
+
+train1d.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/train1d.py</ai-context>
+
+fractal1d.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/fractal1d.py</ai-context>
+
+func1d.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/func1d.py</ai-context>
+
+sa.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/sa.py</ai-context>
+
+optimizer.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/optimizer.py</ai-context>
+
+Now make a 2d version. (A random) half of the "values" should split horizontally and half vertically (this is hardcoded). for the vertical splits, left_matrix and right_matrix should still have the same names, but effectively be top and bottom.
+
+## ASSISTANT:
+
+I'll create a 2D version of your fractal function system. The main changes will be:
+
+1. Extend the 1D fractal concept to 2D by allowing both horizontal and vertical splits
+2. Modify parameters to handle 2D coordinates
+3. Update the function evaluation to work with 2D inputs
+4. Adjust the optimization strategy for 2D functions
+
+Here's how I'll implement the key components:
+
+```python
+# fractal2d.py
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import numpy as np
+from typing import Literal
+
+from sa import PerturbableParameter, CategoricalMatrixParameter
+from func2d import generate_fractal_function_2d
+
+
+class Fractal2D(nn.Module):
+    """PyTorch module wrapper for 2D fractal function generator with integrated history tracking."""
+
+    def __init__(
+        self,
+        num_values: int = 4,
+        smoothing_width: float = 0.1,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    ):
+        super().__init__()
+        self.num_values = num_values
+        self.smoothing_width = smoothing_width
+        self.device = device
+
+        # Create standard perturbable parameters
+        self.split_points_param = PerturbableParameter(
+            torch.rand(num_values, device=device) * 0.5 + 0.25, name="split_points"
+        )
+        self.values_param = PerturbableParameter(
+            torch.linspace(0, 1, num_values, device=device)
+        )
+
+        # Determine which split types to use (horizontal or vertical)
+        # Randomly assign half to each type
+        split_indices = torch.randperm(num_values)
+        self.horizontal_splits = torch.zeros(num_values, dtype=torch.bool)
+        self.horizontal_splits[split_indices[:num_values//2]] = True
+
+        # Create categorical matrix parameters for transitions
+        left_mat = torch.zeros(num_values, num_values)
+        right_mat = torch.zeros(num_values, num_values)
+
+        # Initialize with random active values
+        for i in range(num_values):
+            left_mat[i, torch.randint(0, num_values, (1,))] = 1.0
+            right_mat[i, torch.randint(0, num_values, (1,))] = 1.0
+
+        self.left_matrix = CategoricalMatrixParameter(left_mat)
+        self.right_matrix = CategoricalMatrixParameter(right_mat)
+
+        # Initialize history dictionary
+        self.reset_history()
+
+    def reset_history(self):
+        """Reset the history tracking."""
+        self.history = {
+            "loss": [],
+            "entropy_loss": [],
+            "split_points": [],
+            "values": [],
+            "left_matrix": [],
+            "right_matrix": [],
+            "predicted_z": [],
+            "iterations": [],
+        }
+
+    @property
+    def split_points(self):
+        return torch.sigmoid(self.split_points_param) * 0.8 + 0.1
+
+    @property
+    def values(self):
+        return self.values_param * 4.0 + 1.0
+
+    def get_function(self, max_depth: int, use_argmax: bool):
+        func = generate_fractal_function_2d(
+            split_points=self.split_points,
+            values=self.values,
+            left_children_matrix=self.left_matrix,
+            right_children_matrix=self.right_matrix,
+            horizontal_splits=self.horizontal_splits,
+            max_depth=max_depth,
+            smoothing_width=self.smoothing_width,
+            use_argmax=use_argmax,
+        )
+        return func
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        max_depth: int,
+        use_argmax: bool = False,
+    ) -> torch.Tensor:
+        """
+        Evaluate the 2D fractal function at the given points.
+
+        Args:
+            x: X-coordinate tensor of shape [batch_size]
+            y: Y-coordinate tensor of shape [batch_size]
+            max_depth: Maximum depth for function evaluation
+            use_argmax: Whether to use argmax (deterministic) instead of softmax (probabilistic)
+
+        Returns:
+            Output tensor of shape [batch_size]
+        """
+        func = self.get_function(max_depth=max_depth, use_argmax=use_argmax)
+        return func(x, y)
+
+    def get_entropy_loss(self) -> torch.Tensor:
+        """Calculate entropy loss for the left and right matrices."""
+        left_probs = torch.nn.functional.softmax(self.left_matrix * 10.0, dim=1)
+        right_probs = torch.nn.functional.softmax(self.right_matrix * 10.0, dim=1)
+
+        left_entropy = -torch.sum(
+            left_probs * torch.log(left_probs + 1e-10), dim=1
+        ).mean()
+        right_entropy = -torch.sum(
+            right_probs * torch.log(right_probs + 1e-10), dim=1
+        ).mean()
+
+        return (left_entropy + right_entropy) / 2.0
+
+    def track_iteration(
+        self,
+        iteration: int,
+        recon_loss: torch.Tensor,
+        entropy_loss: torch.Tensor,
+    ):
+        self.history["loss"].append(recon_loss.item())
+        self.history["entropy_loss"].append(entropy_loss.item())
+
+        self.history["split_points"].append(
+            self.split_points_param.detach().cpu().numpy()
+        )
+        self.history["values"].append(self.values_param.detach().cpu().numpy())
+        self.history["left_matrix"].append(self.left_matrix.detach().cpu().numpy())
+        self.history["right_matrix"].append(self.right_matrix.detach().cpu().numpy())
+        self.history["iterations"].append(iteration)
+
+    def plot_history(
+        self,
+        depths: list[int],
+        target_x: torch.Tensor,
+        target_y: torch.Tensor,
+        target_z: torch.Tensor,
+        viz_resolution: int = 50,
+    ):
+        # Create grid of points for visualization
+        x_range = torch.linspace(0, 1, viz_resolution, device=self.device)
+        y_range = torch.linspace(0, 1, viz_resolution, device=self.device)
+        xx, yy = torch.meshgrid(x_range, y_range, indexing='ij')
+
+        grid_x = xx.reshape(-1)
+        grid_y = yy.reshape(-1)
+
+        # Evaluate function at different depths
+        with torch.no_grad():
+            eval_zs = {depth: self(grid_x, grid_y, depth, use_argmax=True)
+                       for depth in depths}
+
+        iteration = self.history["iterations"][-1]
+
+        # Create figure with subplots
+        fig = plt.figure(figsize=(12, 4 * (1 + len(depths))))
+
+        # Plot loss history
+        ax_loss = fig.add_subplot(1 + len(depths), 1, 1)
+        ax_loss.plot(self.history["loss"], label="Reconstruction Loss", color="blue")
+        ax_loss.set_title(f"Loss (Iteration {iteration})")
+        ax_loss.set_xlabel("Iteration")
+        ax_loss.set_ylabel("Loss Value")
+        ax_loss.grid(True)
+
+        # Plot 3D surfaces for each depth
+        for i, depth in enumerate(depths):
+            ax = fig.add_subplot(1 + len(depths), 1, i + 2, projection='3d')
+
+            # Reshape data back to grid
+            z_grid = eval_zs[depth].reshape(viz_resolution, viz_resolution).cpu().numpy()
+            x_grid = xx.cpu().numpy()
+            y_grid = yy.cpu().numpy()
+
+            # Plot surface
+            surf = ax.plot_surface(x_grid, y_grid, z_grid, cmap='viridis', alpha=0.8)
+
+            # Plot target points if provided
+            if target_x is not None and target_y is not None and target_z is not None:
+                ax.scatter(
+                    target_x.cpu().numpy(),
+                    target_y.cpu().numpy(),
+                    target_z.cpu().numpy(),
+                    color='red', s=10, label='Target Points'
+                )
+
+            ax.set_title(f"Fractal Surface (depth={depth})")
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax.set_zlabel("Z")
+
+        plt.tight_layout()
+        plt.show()
+```
+
+```python
+# func2d.py
+import torch
+from typing import Callable
+
+
+class FractalFunction2D:
+    """Base class for all 2D fractal function components"""
+
+    def __call__(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Evaluate the function at point (x,y)"""
+        raise NotImplementedError("Subclasses must implement __call__")
+
+
+class ConstantFunction2D(FractalFunction2D):
+    """A constant 2D function f(x,y) = c"""
+
+    def __init__(self, value: float | torch.Tensor):
+        self.value = value
+
+    def __call__(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.value, torch.Tensor):
+            return self.value.expand_as(x)
+        else:
+            return torch.full_like(x, self.value)
+
+
+class SigmoidFunction2D(FractalFunction2D):
+    """A sigmoid function centered at a point along an axis"""
+
+    def __init__(self, center: float, width: float, axis: str = 'x'):
+        self.center = center
+        self.width = width
+        self.scale = 20.0 / width
+        self.axis = axis  # 'x' for horizontal split, 'y' for vertical split
+
+    def __call__(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # Use x coordinate for horizontal splits, y coordinate for vertical splits
+        coord = x if self.axis == 'x' else y
+        return torch.sigmoid((coord - self.center) * self.scale)
+
+
+class BlendedFunction2D(FractalFunction2D):
+    """A smooth blend of two functions using a sigmoid transition"""
+
+    def __init__(
+        self,
+        left_func: FractalFunction2D,
+        right_func: FractalFunction2D,
+        transition: SigmoidFunction2D,
+        depth: int,
+    ):
+        self.left_func = left_func
+        self.right_func = right_func
+        self.transition = transition
+        self.depth = depth
+
+    def __call__(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        t = self.transition(x, y)
+        return (1 - t) * self.left_func(x, y) + t * self.right_func(x, y)
+
+
+def generate_fractal_function_2d(
+    split_points: torch.Tensor,
+    values: torch.Tensor,
+    left_children_matrix: torch.Tensor,
+    right_children_matrix: torch.Tensor,
+    horizontal_splits: torch.Tensor,  # Boolean tensor indicating split orientation
+    max_depth: int = 3,
+    smoothing_width: float = 0.1,
+    use_argmax: bool = False,
+) -> FractalFunction2D:
+    """
+    Creates a 2D fractal function through differentiable function composition.
+
+    Args:
+        split_points: List of split points (0-1) for each segment
+        values: Base values for each segment
+        left_children_matrix: Matrix of child logits for left/top branches
+        right_children_matrix: Matrix of child logits for right/bottom branches
+        horizontal_splits: Boolean tensor indicating whether each node splits horizontally or vertically
+        max_depth: Maximum recursion depth
+        smoothing_width: Width of the smoothing transition (0-1)
+        use_argmax: If True, uses deterministic argmax path instead of probabilistic softmax
+
+    Returns:
+        A composable differentiable 2D function object
+    """
+    if use_argmax:
+        # Argmax path - use indices directly
+        left_indices = torch.argmax(left_children_matrix, dim=1)
+        right_indices = torch.argmax(right_children_matrix, dim=1)
+        left_children_probs = None
+        right_children_probs = None
+    else:
+        # Softmax path - use probability distributions
+        left_children_probs = torch.nn.functional.softmax(left_children_matrix * 10.0, dim=1)
+        right_children_probs = torch.nn.functional.softmax(right_children_matrix * 10.0, dim=1)
+
+    # Function cache to prevent exponential explosion
+    function_cache = {}
+
+    def build_function(
+        depth: int,
+        x_start: float,
+        x_end: float,
+        y_start: float,
+        y_end: float,
+        parent_idx: int,
+    ) -> FractalFunction2D:
+        """Recursively build the fractal function for the 2D region"""
+
+        # Use memoization to avoid exponential explosion
+        cache_key = (depth, x_start, x_end, y_start, y_end, parent_idx)
+        if cache_key in function_cache:
+            return function_cache[cache_key]
+
+        value = values[parent_idx]
+
+        # Base case - maximum depth reached
+        if depth == max_depth:
+            result = ConstantFunction2D(value)
+            function_cache[cache_key] = result
+            return result
+
+        # Get split orientation for this node
+        is_horizontal = horizontal_splits[parent_idx % len(horizontal_splits)]
+
+        # Calculate split position based on orientation
+        split = split_points[parent_idx % len(split_points)]
+
+        if is_horizontal:
+            # Horizontal split (left-right)
+            mid_x = x_start + split * (x_end - x_start)
+            segment_size = x_end - x_start
+            transition = SigmoidFunction2D(mid_x, smoothing_width * segment_size, axis='x')
+
+            if use_argmax:
+                left_child_idx = left_indices[parent_idx].item()
+                right_child_idx = right_indices[parent_idx].item()
+
+                left_func = build_function(
+                    depth + 1, x_start, mid_x, y_start, y_end, left_child_idx
+                )
+                right_func = build_function(
+                    depth + 1, mid_x, x_end, y_start, y_end, right_child_idx
+                )
+            else:
+                # Create weighted branches similar to 1D version
+                # Left branch (blend of children based on probabilities)
+                left_probs = left_children_probs[parent_idx]
+                left_branches = []
+                for i, prob in enumerate(left_probs):
+                    if prob > 1e-5:  # Skip negligible contributions
+                        child_func = build_function(
+                            depth + 1, x_start, mid_x, y_start, y_end, i
+                        )
+                        left_branches.append((prob, child_func))
+
+                # Right branch
+                right_probs = right_children_probs[parent_idx]
+                right_branches = []
+                for i, prob in enumerate(right_probs):
+                    if prob > 1e-5:
+                        child_func = build_function(
+                            depth + 1, mid_x, x_end, y_start, y_end, i
+                        )
+                        right_branches.append((prob, child_func))
+
+                # Blend left branches
+                if not left_branches:
+                    left_func = ConstantFunction2D(values[0])
+                else:
+                    left_branches.sort(key=lambda x: x[0], reverse=True)
+                    left_func = left_branches[0][1]
+                    total_weight = left_branches[0][0]
+
+                    for weight, func in left_branches[1:3]:
+                        blend_weight = weight / (total_weight + weight)
+                        weight_func = ConstantFunction2D(blend_weight)
+                        left_func = BlendedFunction2D(left_func, func, weight_func, depth)
+                        total_weight = total_weight + weight
+
+                # Blend right branches
+                if not right_branches:
+                    right_func = ConstantFunction2D(values[0])
+                else:
+                    right_branches.sort(key=lambda x: x[0], reverse=True)
+                    right_func = right_branches[0][1]
+                    total_weight = right_branches[0][0]
+
+                    for weight, func in right_branches[1:3]:
+                        blend_weight = weight / (total_weight + weight)
+                        weight_func = ConstantFunction2D(blend_weight)
+                        right_func = BlendedFunction2D(right_func, func, weight_func, depth)
+                        total_weight = total_weight + weight
+
+        else:
+            # Vertical split (top-bottom)
+            mid_y = y_start + split * (y_end - y_start)
+            segment_size = y_end - y_start
+            transition = SigmoidFunction2D(mid_y, smoothing_width * segment_size, axis='y')
+
+            if use_argmax:
+                left_child_idx = left_indices[parent_idx].item()  # Top child
+                right_child_idx = right_indices[parent_idx].item()  # Bottom child
+
+                left_func = build_function(
+                    depth + 1, x_start, x_end, y_start, mid_y, left_child_idx
+                )
+                right_func = build_function(
+                    depth + 1, x_start, x_end, mid_y, y_end, right_child_idx
+                )
+            else:
+                # Top branch
+                left_probs = left_children_probs[parent_idx]
+                left_branches = []
+                for i, prob in enumerate(left_probs):
+                    if prob > 1e-5:
+                        child_func = build_function(
+                            depth + 1, x_start, x_end, y_start, mid_y, i
+                        )
+                        left_branches.append((prob, child_func))
+
+                # Bottom branch
+                right_probs = right_children_probs[parent_idx]
+                right_branches = []
+                for i, prob in enumerate(right_probs):
+                    if prob > 1e-5:
+                        child_func = build_function(
+                            depth + 1, x_start, x_end, mid_y, y_end, i
+                        )
+                        right_branches.append((prob, child_func))
+
+                # Blend top branches
+                if not left_branches:
+                    left_func = ConstantFunction2D(values[0])
+                else:
+                    left_branches.sort(key=lambda x: x[0], reverse=True)
+                    left_func = left_branches[0][1]
+                    total_weight = left_branches[0][0]
+
+                    for weight, func in left_branches[1:3]:
+                        blend_weight = weight / (total_weight + weight)
+                        weight_func = ConstantFunction2D(blend_weight)
+                        left_func = BlendedFunction2D(left_func, func, weight_func, depth)
+                        total_weight = total_weight + weight
+
+                # Blend bottom branches
+                if not right_branches:
+                    right_func = ConstantFunction2D(values[0])
+                else:
+                    right_branches.sort(key=lambda x: x[0], reverse=True)
+                    right_func = right_branches[0][1]
+                    total_weight = right_branches[0][0]
+
+                    for weight, func in right_branches[1:3]:
+                        blend_weight = weight / (total_weight + weight)
+                        weight_func = ConstantFunction2D(blend_weight)
+                        right_func = BlendedFunction2D(right_func, func, weight_func, depth)
+                        total_weight = total_weight + weight
+
+        # Create final blended function
+        result = BlendedFunction2D(left_func, right_func, transition, depth)
+        function_cache[cache_key] = result
+        return result
+
+    # Create the full function with domain restriction
+    fractal_func = build_function(depth=0, x_start=0.0, x_end=1.0, y_start=0.0, y_end=1.0, parent_idx=0)
+
+    # Create wrapper with domain restriction
+    class DomainRestrictedFractal2D(FractalFunction2D):
+        def __init__(self, func: FractalFunction2D):
+            self.func = func
+            # Store parameters to allow gradient flow
+            self.left_children_matrix = left_children_matrix
+            self.right_children_matrix = right_children_matrix
+            self.split_points = split_points
+            self.values = values
+            self.horizontal_splits = horizontal_splits
+            self.use_argmax = use_argmax
+
+        def __call__(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+            x_clipped = torch.clamp(x, 0.0, 1.0)
+            y_clipped = torch.clamp(y, 0.0, 1.0)
+            return self.func(x_clipped, y_clipped)
+
+    return DomainRestrictedFractal2D(fractal_func)
+```
+
+Now, for the optimization part, we'll create a 2D version of the train function:
+
+```python
+# train2d.py
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from torch.optim import Adam
+
+from fractal2d import Fractal2D
+from sa import SimulatedAnnealing
+from optimizer import Optimizer, OptimizerPart
+
+
+def optimize_fractal_function_2d(
+    model: Fractal2D,
+    max_depth: int,
+    target_z: torch.Tensor,
+    target_x: torch.Tensor | None = None,
+    target_y: torch.Tensor | None = None,
+    num_iterations: int = 2000,
+    adam_lr: float = 0.01,
+    sa_initial_temp: float = 1.0,
+    sa_min_temp: float = 0.1,
+    sa_num_restarts: int = 3,
+    sa_step_size: float = 0.1,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    plot_every_n: int = 50,
+    show_progress: bool = True,
+    viz_resolution: int = 50,
+) -> Fractal2D:
+    # Generate default target points grid if not provided
+    if target_x is None or target_y is None:
+        # Create a grid of points
+        grid_size = int(len(target_z) ** 0.5)  # Square grid
+        x_points = torch.linspace(0, 1, grid_size, device=device)
+        y_points = torch.linspace(0, 1, grid_size, device=device)
+        xx, yy = torch.meshgrid(x_points, y_points, indexing='ij')
+        target_x = xx.reshape(-1)
+        target_y = yy.reshape(-1)
+    else:
+        target_x = target_x.to(device)
+        target_y = target_y.to(device)
+
+    target_z = target_z.to(device)
+
+    # Set up optimizer parts
+    parts = [
+        OptimizerPart(
+            lambda num_iterations: SimulatedAnnealing(
+                [model.split_points_param, model.left_matrix, model.right_matrix],
+                num_iterations=num_iterations,
+                initial_temp=sa_initial_temp,
+                num_restarts=sa_num_restarts,
+                min_temp=sa_min_temp,
+                step_size=sa_step_size,
+            ),
+            max_depth=max_depth,
+            weight=50,
+        ),
+        OptimizerPart(
+            Adam([model.split_points_param, model.values_param]), max_depth=max_depth
+        ),
+    ]
+
+    optimizer = Optimizer(parts, num_iterations=num_iterations)
+
+    best_loss = float("inf")
+    best_state = {}
+
+    def closure():
+        is_sa = isinstance(optimizer.current_optimizer, SimulatedAnnealing)
+        grad_class = torch.no_grad if is_sa else torch.enable_grad
+        with grad_class():
+            optimizer.zero_grad()
+            predicted_z = model(
+                target_x,
+                target_y,
+                optimizer.max_depth,
+                use_argmax=True,
+            )
+            recon_loss = compute_loss(predicted_z, target_z)
+
+            # Evaluate at a higher depth too for regularization
+            predicted_z1 = model(
+                target_x,
+                target_y,
+                optimizer.max_depth + 3,
+                use_argmax=True,
+            )
+            recon_loss1 = compute_loss(predicted_z1, target_z)
+
+            loss = recon_loss + recon_loss1
+
+            if not is_sa:
+                loss.backward()
+
+            return loss
+
+    for i in range(num_iterations):
+        plot_fn = lambda: model.plot_history(
+            depths=[optimizer.max_depth, optimizer.max_depth + 3],
+            target_x=target_x,
+            target_y=target_y,
+            target_z=target_z,
+            viz_resolution=viz_resolution,
+        )
+
+        loss = optimizer.step(closure, plot_fn)
+
+        model.track_iteration(
+            iteration=i,
+            recon_loss=loss,
+            entropy_loss=model.get_entropy_loss(),
+        )
+
+        if plot_every_n > 0 and (i % plot_every_n == 0 or i == num_iterations - 1):
+            plot_fn()
+
+        is_sa = isinstance(optimizer.current_optimizer, SimulatedAnnealing)
+
+        if show_progress and (i % plot_every_n == 0 or i == num_iterations - 1):
+            print(
+                f"Iteration {i}/{num_iterations}, Loss: {loss.item():.6f}, {'sa' if is_sa else 'adam'}, Max depth: {optimizer.max_depth}"
+            )
+
+        if is_sa and loss.item() < best_loss:
+            best_loss = loss.item()
+            print("Best loss!")
+            plot_fn()
+
+        # Save best state
+        if optimizer.is_last_part and loss.item() < best_loss:
+            best_loss = loss.item()
+            best_state = {
+                "split_points_param": model.split_points_param.detach().clone(),
+                "values_param": model.values_param.detach().clone(),
+                "left_matrix": model.left_matrix.detach().clone(),
+                "right_matrix": model.right_matrix.detach().clone(),
+            }
+
+    # Restore best parameters
+    model.split_points_param.data.copy_(best_state["split_points_param"])
+    model.values_param.data.copy_(best_state["values_param"])
+    model.left_matrix.data.copy_(best_state["left_matrix"])
+    model.right_matrix.data.copy_(best_state["right_matrix"])
+
+    return model
+
+
+def compute_loss(predicted_z, target_z):
+    threshold_loss = SmoothThresholdLoss()
+    mse_loss = nn.MSELoss()
+    return threshold_loss(predicted_z, target_z) + mse_loss(predicted_z, target_z)
+
+
+class SmoothThresholdLoss(nn.Module):
+    def __init__(
+        self,
+        threshold: float = 0.5,
+        sharpness: float = 10.0,
+        small_loss_factor: float = 0.01,
+        large_loss_base: float = 10.0,
+    ):
+        """
+        Smooth threshold loss with sigmoid transition
+
+        Args:
+            threshold: Error threshold for transition
+            sharpness: How sharp the transition is (higher = more abrupt)
+            small_loss_factor: Scaling factor for errors within threshold
+            large_loss_base: Base penalty for errors beyond threshold
+        """
+        super().__init__()
+        self.threshold = threshold
+        self.sharpness = sharpness
+        self.small_loss_factor = small_loss_factor
+        self.large_loss_base = large_loss_base
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        errors = torch.abs(y_true - y_pred)
+
+        # Sigmoid transition at the threshold
+        sigmoid_factor = 1 / (
+            1 + torch.exp(-self.sharpness * (errors - self.threshold))
+        )
+
+        # Small loss within threshold, large loss outside
+        small_loss = self.small_loss_factor * errors.pow(2)
+        large_loss = self.large_loss_base + errors.pow(2)
+
+        # Combine using sigmoid weighting
+        loss = small_loss * (1 - sigmoid_factor) + large_loss * sigmoid_factor
+
+        return loss.mean()
+
+
+# Demo function
+def demo_optimization_2d():
+    import torch
+    import numpy as np
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Create target function (peaks function)
+    grid_size = 50
+    x = np.linspace(0, 1, grid_size)
+    y = np.linspace(0, 1, grid_size)
+    xx, yy = np.meshgrid(x, y)
+
+    # Create a simple target function (peaks)
+    x_scaled = 3 * (2*xx - 1)
+    y_scaled = 3 * (2*yy - 1)
+    z = (3*(1-x_scaled)**2) * np.exp(-x_scaled**2 - (y_scaled+1)**2) \
+        - 10*(x_scaled/5 - x_scaled**3 - y_scaled**5) * np.exp(-x_scaled**2 - y_scaled**2) \
+        - 1/3 * np.exp(-(x_scaled+1)**2 - y_scaled**2)
+
+    # Normalize to 0-1 range
+    z = (z - z.min()) / (z.max() - z.min())
+
+    # Convert to tensors
+    target_x = torch.from_numpy(xx.flatten()).float().to(device)
+    target_y = torch.from_numpy(yy.flatten()).float().to(device)
+    target_z = torch.from_numpy(z.flatten()).float().to(device)
+
+    # Create and optimize model
+    model = Fractal2D(num_values=6, device=device)
+
+    optimized_model = optimize_fractal_function_2d(
+        model=model,
+        max_depth=3,
+        target_z=target_z,
+        target_x=target_x,
+        target_y=target_y,
+        num_iterations=300,
+        adam_lr=0.01,
+        sa_initial_temp=1.0,
+        sa_num_restarts=2,
+        plot_every_n=50,
+    )
+
+    return optimized_model
+
+
+if __name__ == "__main__":
+    optimized_model = demo_optimization_2d()
+    plt.show()
+```
+
+The
+
+## USER:
