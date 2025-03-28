@@ -22,475 +22,835 @@ train2d.py:
 fractal2d_nondiff.py:
 <ai-context>/Users/andreas/projects/personal-website/frame-optimizer/fractal2d_nondiff.py</ai-context>
 
-give me an alternative implementation using a scheme similar to PPO to optimize the matrix parameters (that's the only parameter i'm modifying)
+Help me make a new optimizer (with the same API as SimulatedAnnealing) that's inspired by PPO. Be careful to note the different types of the different parameters in Fractal2DNonDiff. Use one-hot encoding for categorical values (use the is_categorical and get_num_categories).
+
+I don't know if I need the full actor/critic framework (you know best!), but I want to optimize a neural network to predict parameters for my Fractal2DNonDiff that minimizes the loss. I.e. in the best case, I should be able to call network() and get a list of parameters (where I then take the argmax of the one-hot encoded parts corresponding to categorical parameters) and get parameters that when I put them into Fractal2DNonDiff I get an output with 0 loss.
+
+Notice that there is a .perturb() method and all parameters implement PerturbableParameter.
+
+Here is a reference implementation of PPO:
+
+<ai-context>https://raw.githubusercontent.com/nikhilbarhate99/PPO-PyTorch/refs/heads/master/PPO.py</ai-context>
 
 
 ## ASSISTANT:
 
-I'll provide an alternative implementation using a scheme similar to PPO (Proximal Policy Optimization) for optimizing the matrix parameters in your fractal model. Instead of using simulated annealing, we'll implement a reinforcement learning-inspired approach.
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/ppo.py</ai-context>
 
-Here's an implementation:
+## USER:
+
+action_tensor is not actually used! how is this even supposed to work?
+
+
+## ASSISTANT:
+
+You're right - that's an incomplete implementation of PPO in the reference. The `action_tensor` isn't being used correctly, and there are several other issues with how it would integrate with the fractal parameter optimization task.
+
+Let me create a proper PPO optimizer that fits your requirements:
 
 ```python
 import torch
 import torch.nn as nn
+from torch.optim import Optimizer
+from torch.distributions import Categorical
 import numpy as np
-from typing import Callable, List, Tuple, Dict, Any
+from typing import Callable, Iterable, List, Dict, Tuple
 
-class PPOMatrixOptimizer(nn.Module):
+
+class PPOParameterPolicy(nn.Module):
     def __init__(
         self,
-        matrices_param,
-        num_values: int,
-        num_dupes: int,
-        lr: float = 0.01,
-        clip_ratio: float = 0.2,
-        entropy_coef: float = 0.01,
-        value_coef: float = 0.5,
+        params: List[nn.Parameter],
+        hidden_size: int = 64,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         """
-        PPO-inspired optimizer for matrix parameters.
+        Neural network policy for predicting parameter distributions.
 
         Args:
-            matrices_param: The matrix parameter to optimize
-            num_values: Number of distinct values in the fractal
-            num_dupes: Number of duplications
-            lr: Learning rate
-            clip_ratio: PPO clipping parameter
-            entropy_coef: Coefficient for entropy bonus
-            value_coef: Coefficient for value loss
+            params: List of PerturbableParameters to optimize
+            hidden_size: Size of hidden layers in the policy network
+            device: Device to run the policy on
         """
         super().__init__()
-        self.matrices_param = matrices_param
-        self.num_values = num_values
-        self.num_dupes = num_dupes
-        self.num_values_with_dupes = num_values * num_dupes
-        self.clip_ratio = clip_ratio
-        self.entropy_coef = entropy_coef
-        self.value_coef = value_coef
         self.device = device
+        self.params = params
 
-        # Policy network: predicts probability distribution for matrix entries
-        self.policy_net = nn.Sequential(
-            nn.Linear(self.num_values_with_dupes * 2, 128),
-            nn.ReLU(),
-            nn.Linear(128, self.num_values_with_dupes * 2 * self.num_values_with_dupes)
-        ).to(device)
+        # Store parameter metadata for efficient access
+        self.param_info = []
 
-        # Value network: estimates expected reward for state
-        self.value_net = nn.Sequential(
-            nn.Linear(self.num_values_with_dupes * 2, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1)
-        ).to(device)
+        input_size = 3  # [current_loss, best_loss, temperature]
+        output_size = 0
 
-        # Optimizer for both networks
-        self.optimizer = torch.optim.Adam(
-            list(self.policy_net.parameters()) + list(self.value_net.parameters()),
-            lr=lr
+        for param in params:
+            is_categorical = getattr(param, "is_categorical", False)
+            num_categories = getattr(param, "get_num_categories", lambda: 0)()
+
+            # For categorical parameters, output logits for each category
+            # For continuous parameters, output mean and log_std
+            if is_categorical and num_categories > 0:
+                output_dim = num_categories
+                output_type = "categorical"
+            else:
+                output_dim = param.numel() * 2  # mean and log_std for each element
+                output_type = "continuous"
+
+            self.param_info.append({
+                "id": id(param),
+                "name": getattr(param, "param_name", f"param_{len(self.param_info)}"),
+                "output_type": output_type,
+                "output_dim": output_dim,
+                "output_start": output_size,
+                "is_categorical": is_categorical,
+                "num_categories": num_categories,
+                "min": getattr(param, "min", 0.0),
+                "max": getattr(param, "max", 1.0),
+                "shape": param.shape,
+                "numel": param.numel(),
+            })
+
+            output_size += output_dim
+
+        # Shared feature extractor
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
         )
 
-        # Memory buffers for PPO
-        self.reset_memory()
+        # Policy (Actor) head that outputs distributions for all parameters
+        self.policy_head = nn.Linear(hidden_size, output_size)
 
-        # Best performance tracking
-        self.best_loss = float('inf')
-        self.best_matrices = None
+        # Value (Critic) head for estimating value function
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, 1)
+        )
 
-    def reset_memory(self):
-        """Reset the memory buffer for a new optimization epoch"""
-        self.memory = {
-            'states': [],
-            'actions': [],
-            'rewards': [],
-            'values': [],
-            'log_probs': [],
-        }
-
-    def get_current_state(self) -> torch.Tensor:
-        """Convert current matrix state to a flattened representation"""
-        # Flatten both matrices into a single vector
-        left_mat = self.matrices_param[0].flatten()
-        right_mat = self.matrices_param[1].flatten()
-        return torch.cat([left_mat, right_mat]).to(self.device)
-
-    def select_action(self, state: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+    def forward(self, state):
         """
-        Select an action (matrix perturbation) based on current policy
-        Returns action dict and log probability
-        """
-        # Forward pass through policy network to get action distributions
-        policy_logits = self.policy_net(state).view(2, self.num_values_with_dupes, self.num_values_with_dupes)
-
-        # Create categorical distributions for each row of both matrices
-        distributions = []
-        for matrix_idx in range(2):  # Left and right matrices
-            for row_idx in range(self.num_values_with_dupes):
-                logits = policy_logits[matrix_idx, row_idx]
-                distributions.append(torch.distributions.Categorical(logits=logits))
-
-        # Sample actions and calculate log probabilities
-        actions = {}
-        log_probs = []
-
-        actions["left_matrix"] = torch.zeros((self.num_values_with_dupes, self.num_values_with_dupes),
-                                           device=self.device)
-        actions["right_matrix"] = torch.zeros((self.num_values_with_dupes, self.num_values_with_dupes),
-                                            device=self.device)
-
-        for row_idx in range(self.num_values_with_dupes):
-            # Sample left matrix row
-            left_dist = distributions[row_idx]
-            left_action = left_dist.sample()
-            log_probs.append(left_dist.log_prob(left_action))
-            actions["left_matrix"][row_idx, left_action] = 1.0
-
-            # Sample right matrix row
-            right_dist = distributions[self.num_values_with_dupes + row_idx]
-            right_action = right_dist.sample()
-            log_probs.append(right_dist.log_prob(right_action))
-            actions["right_matrix"][row_idx, right_action] = 1.0
-
-        # Enforce modulo constraints if needed
-        self._enforce_modulo_constraints(actions)
-
-        # Calculate value estimate
-        value = self.value_net(state)
-
-        return actions, torch.stack(log_probs).sum(), value
-
-    def _enforce_modulo_constraints(self, actions: Dict[str, torch.Tensor]) -> None:
-        """Enforce modulo constraints for matrix transitions"""
-        # Skip if no dupes (no constraints needed)
-        if self.num_dupes <= 1:
-            return
-
-        # For each set of duplicates, enforce matching transitions in modulo space
-        for value_idx in range(self.num_values):
-            for matrix_idx, matrix_name in enumerate(["left_matrix", "right_matrix"]):
-                # Get indices of duplicates for this value
-                dupe_indices = [value_idx + i * self.num_values for i in range(self.num_dupes)]
-
-                # Get the chosen transition for the first duplicate
-                first_dupe = dupe_indices[0]
-                chosen_col = torch.argmax(actions[matrix_name][first_dupe]).item()
-                chosen_value = chosen_col % self.num_values
-
-                # For other duplicates, ensure they transition to matching value modulo num_values
-                for dupe_idx in dupe_indices[1:]:
-                    # Reset row
-                    actions[matrix_name][dupe_idx] = 0.0
-
-                    # Find columns with matching modulo value
-                    matching_cols = [col for col in range(self.num_values_with_dupes)
-                                    if col % self.num_values == chosen_value]
-
-                    # Choose a random matching column
-                    if matching_cols:
-                        chosen_match = matching_cols[torch.randint(0, len(matching_cols), (1,)).item()]
-                        actions[matrix_name][dupe_idx, chosen_match] = 1.0
-
-    def apply_action(self, action: Dict[str, torch.Tensor]) -> None:
-        """Apply the selected action to the matrices parameter"""
-        with torch.no_grad():
-            self.matrices_param[0].copy_(action["left_matrix"])
-            self.matrices_param[1].copy_(action["right_matrix"])
-
-    def store_transition(self, state, action, log_prob, value):
-        """Store transition in memory buffer"""
-        self.memory['states'].append(state)
-        self.memory['actions'].append(action)
-        self.memory['log_probs'].append(log_prob)
-        self.memory['values'].append(value)
-
-    def update_policy(self, final_reward: float) -> float:
-        """Update policy networks using PPO algorithm"""
-        # Compute returns and advantages
-        rewards = [0] * len(self.memory['states'])
-        rewards[-1] = final_reward
-
-        returns = []
-        advantages = []
-        R = rewards[-1]
-
-        for r, v in zip(reversed(rewards), reversed(self.memory['values'])):
-            R = r + 0.99 * R  # Use gamma=0.99
-            returns.insert(0, R)
-            advantages.insert(0, R - v.item())
-
-        # Convert lists to tensors
-        states = torch.stack(self.memory['states'])
-        old_log_probs = torch.stack(self.memory['log_probs'])
-        returns = torch.tensor(returns, device=self.device).unsqueeze(1)
-        advantages = torch.tensor(advantages, device=self.device).unsqueeze(1)
-
-        # PPO update loop
-        for _ in range(5):  # Multiple epochs of PPO updates
-            # Get new action probabilities and values
-            new_values = self.value_net(states)
-
-            # Compute policy loss for each state-action pair
-            policy_loss = 0
-            entropy_loss = 0
-
-            for i, state in enumerate(states):
-                # Get new distribution
-                policy_logits = self.policy_net(state).view(2, self.num_values_with_dupes, self.num_values_with_dupes)
-
-                # Reconstruct action log probs
-                new_log_prob = 0
-                for matrix_idx in range(2):
-                    for row_idx in range(self.num_values_with_dupes):
-                        logits = policy_logits[matrix_idx, row_idx]
-                        dist = torch.distributions.Categorical(logits=logits)
-
-                        # Get the action that was taken
-                        if matrix_idx == 0:
-                            action = torch.argmax(self.memory['actions'][i]["left_matrix"][row_idx]).item()
-                        else:
-                            action = torch.argmax(self.memory['actions'][i]["right_matrix"][row_idx]).item()
-
-                        new_log_prob += dist.log_prob(torch.tensor(action, device=self.device))
-                        entropy_loss -= dist.entropy().mean()
-
-                # Compute ratio and clipped objective
-                ratio = torch.exp(new_log_prob - old_log_probs[i])
-                clipped_ratio = torch.clamp(ratio, 1-self.clip_ratio, 1+self.clip_ratio)
-
-                policy_objective = advantages[i] * ratio
-                clipped_objective = advantages[i] * clipped_ratio
-
-                policy_loss -= torch.min(policy_objective, clipped_objective)
-
-            # Compute value loss
-            value_loss = ((new_values - returns) ** 2).mean()
-
-            # Total loss
-            total_loss = policy_loss + self.value_coef * value_loss + self.entropy_coef * entropy_loss
-
-            # Update networks
-            self.optimizer.zero_grad()
-            total_loss.backward()
-            self.optimizer.step()
-
-        # Return the final loss value
-        return total_loss.item()
-
-    def optimize_step(self, eval_fn: Callable) -> float:
-        """
-        Perform one complete optimization step using PPO
+        Forward pass through the network.
 
         Args:
-            eval_fn: Function that evaluates current matrices and returns reward (negative loss)
+            state: Tensor containing [current_loss, best_loss, temperature]
 
         Returns:
-            Current loss value
+            Tuple of (policy_output, value_output)
         """
-        # Get current state
-        state = self.get_current_state()
+        features = self.feature_extractor(state)
+        policy_output = self.policy_head(features)
+        value_output = self.value_head(features)
 
-        # Select action based on current policy
-        action, log_prob, value = self.select_action(state)
+        return policy_output, value_output
 
-        # Apply action to matrices
-        self.apply_action(action)
-
-        # Evaluate the new configuration
-        loss = eval_fn()
-        reward = -loss.item()  # Convert loss to reward (negative loss)
-
-        # Store the transition
-        self.store_transition(state, action, log_prob, value)
-
-        # Update policy networks
-        update_loss = self.update_policy(reward)
-
-        # Track best performance
-        if loss.item() < self.best_loss:
-            self.best_loss = loss.item()
-            self.best_matrices = {
-                'left': self.matrices_param[0].detach().clone(),
-                'right': self.matrices_param[1].detach().clone()
-            }
-
-        # Reset memory buffer for next iteration
-        self.reset_memory()
-
-        return loss
-
-    def reset_to_best(self):
-        """Reset matrices to the best configuration found so far"""
-        if self.best_matrices is not None:
-            with torch.no_grad():
-                self.matrices_param[0].copy_(self.best_matrices['left'])
-                self.matrices_param[1].copy_(self.best_matrices['right'])
-```
-
-Now, let's modify the `optimizer.py` file to include this PPO-based optimizer:
-
-```python
-# Add to optimizer.py
-from ppo_matrix_optimizer import PPOMatrixOptimizer
-
-class PPOOptimizerPart(OptimizerPart):
-    def __init__(
-        self,
-        model,
-        max_depth: int = 1,
-        weight: float = 1.0,
-        lr: float = 0.01,
-        clip_ratio: float = 0.2,
-        entropy_coef: float = 0.01,
-        value_coef: float = 0.5,
-        iterations_per_reset: int = 100,
-    ):
+    def get_distributions(self, state):
         """
-        PPO optimizer for matrix parameters
+        Get probability distributions for each parameter.
 
         Args:
-            model: The fractal model
-            max_depth: The max_depth to use during this optimization part
-            weight: Relative weight for allocating iterations
-            lr: Learning rate for PPO
-            clip_ratio: PPO clipping parameter
-            entropy_coef: Coefficient for entropy bonus
-            value_coef: Coefficient for value loss
-            iterations_per_reset: How often to reset to best policy
-        """
-        self.model = model
-        self.optimizer = None  # Will be initialized in finalize_optimizer
-        self.max_depth = max_depth
-        self.weight = weight
-        self.lr = lr
-        self.clip_ratio = clip_ratio
-        self.entropy_coef = entropy_coef
-        self.value_coef = value_coef
-        self.iterations_per_reset = iterations_per_reset
-        self.iterations = 0
+            state: Tensor containing [current_loss, best_loss, temperature]
 
-    def finalize_optimizer(self, num_iterations: int):
-        # Initialize the PPO optimizer with the model's matrices_param
-        self.optimizer = PPOMatrixOptimizer(
-            matrices_param=self.model.matrices_param,
-            num_values=self.model.num_values,
-            num_dupes=self.model.num_dupes,
-            lr=self.lr,
-            clip_ratio=self.clip_ratio,
-            entropy_coef=self.entropy_coef,
-            value_coef=self.value_coef,
-            device=self.model.device
+        Returns:
+            List of distribution objects for each parameter
+        """
+        policy_output, _ = self(state)
+
+        distributions = []
+        for info in self.param_info:
+            output_slice = policy_output[info["output_start"]:info["output_start"] + info["output_dim"]]
+
+            if info["output_type"] == "categorical":
+                # For categorical parameters, use Categorical distribution
+                probs = torch.softmax(output_slice, dim=0)
+                dist = Categorical(probs)
+            else:
+                # For continuous parameters, split into mean and log_std
+                num_elements = info["numel"]
+                mean = output_slice[:num_elements].reshape(info["shape"])
+                log_std = output_slice[num_elements:].reshape(info["shape"])
+                std = torch.exp(torch.clamp(log_std, -20, 2))
+
+                # Custom distribution object that handles multiple continuous values
+                dist = ContinuousDistribution(mean, std, info["min"], info["max"])
+
+            distributions.append(dist)
+
+        return distributions
+
+    def apply_actions(self, actions):
+        """
+        Apply the sampled actions to parameters.
+
+        Args:
+            actions: List of actions, one per parameter
+        """
+        with torch.no_grad():
+            for param, action, info in zip(self.params, actions, self.param_info):
+                # Store current value before modification
+                param.previous_value = param.detach().clone()
+
+                if info["is_categorical"]:
+                    # For categorical parameters like ClassesParameter or ChildIndicesParameter
+                    # We need to handle each parameter type specifically
+                    if isinstance(param, torch.nn.Parameter):
+                        if param.numel() == 1:
+                            param.data.copy_(torch.tensor(action, device=param.device))
+                        else:
+                            # For multi-element categorical parameters, we need to construct
+                            # the appropriate tensor from the categorical choices
+                            new_values = torch.tensor(action, device=param.device).reshape(param.shape)
+                            param.data.copy_(new_values)
+                else:
+                    # For continuous parameters, action is already in the right shape and range
+                    param.data.copy_(action)
+
+
+class ContinuousDistribution:
+    """Custom distribution for continuous parameters with bounds."""
+
+    def __init__(self, mean, std, min_val, max_val):
+        self.mean = mean
+        self.std = std
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def sample(self):
+        """Sample from the distribution and clamp to bounds."""
+        sample = self.mean + self.std * torch.randn_like(self.mean)
+        return torch.clamp(sample, self.min_val, self.max_val)
+
+    def log_prob(self, value):
+        """Compute log probability of the value."""
+        # Gaussian log probability
+        return -((value - self.mean) ** 2) / (2 * self.std ** 2) - torch.log(self.std) - 0.5 * np.log(2 * np.pi)
+
+    def entropy(self):
+        """Compute entropy of the distribution."""
+        # Entropy of Gaussian
+        return 0.5 + 0.5 * np.log(2 * np.pi) + torch.log(self.std)
+
+
+class PPO(Optimizer):
+    def __init__(
+        self,
+        params: Iterable[nn.Parameter],
+        num_iterations: int,
+        lr: float = 0.001,
+        gamma: float = 0.99,
+        epsilon: float = 0.2,
+        epochs: int = 4,
+        initial_temp: float = 1.0,
+        min_temp: float = 0.1,
+    ):
+        """
+        PPO optimizer for fractal parameter optimization.
+
+        Args:
+            params: Iterable of parameters to optimize
+            num_iterations: Total number of optimization iterations
+            lr: Learning rate for the policy network
+            gamma: Discount factor for rewards
+            epsilon: PPO clipping parameter
+            epochs: Number of optimization epochs per update
+            initial_temp: Initial temperature for exploration
+            min_temp: Minimum temperature
+        """
+        self.param_list = list(params)
+        defaults = dict(
+            lr=lr,
+            gamma=gamma,
+            epsilon=epsilon,
+            epochs=epochs,
+            temperature=initial_temp,
+            initial_temp=initial_temp,
+            min_temp=min_temp,
         )
+        super().__init__(self.param_list, defaults)
+
+        # Initialize the policy network
+        self.policy = PPOParameterPolicy(self.param_list)
+        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
+
+        # Set up buffers for PPO updates
+        self.state_buffer = []
+        self.action_buffer = []
+        self.log_prob_buffer = []
+        self.value_buffer = []
+        self.reward_buffer = []
+        self.done_buffer = []
+
+        # Temperature decay
+        self.temp_decay = np.power(min_temp / initial_temp, 1.0 / num_iterations)
+
+        # Track best parameters and loss
+        self.best_loss = float("inf")
+        self.best_params = {}
+        self.prev_loss = float("inf")
+
+        # Buffer size for PPO updates
+        self.update_freq = min(20, num_iterations // 10)
+        self.total_iterations = 0
+
+    def _clear_buffers(self):
+        """Clear all experience buffers."""
+        self.state_buffer.clear()
+        self.action_buffer.clear()
+        self.log_prob_buffer.clear()
+        self.value_buffer.clear()
+        self.reward_buffer.clear()
+        self.done_buffer.clear()
+
+    @torch.no_grad()
+    def step(self, closure: Callable[[], torch.FloatTensor] = None, plot_fn=None) -> torch.FloatTensor:
+        """
+        Perform a single optimization step.
+
+        Args:
+            closure: Function that evaluates the model and returns the loss
+            plot_fn: Optional function to call for visualization
+
+        Returns:
+            The loss value
+        """
+        assert closure is not None, "Closure must be provided"
+
+        # Get current loss before perturbation
+        current_loss = closure().item()
+
+        # Update best parameters if the current loss is better
+        if current_loss < self.best_loss:
+            self.best_loss = current_loss
+            self.best_params = {
+                id(p): p.detach().clone()
+                for p in self.param_list
+            }
+            # Call plot function if loss improved significantly
+            if plot_fn and (self.prev_loss - current_loss) > 0.05:
+                plot_fn()
+
+        # Get current temperature
+        for group in self.param_groups:
+            temperature = group["temperature"]
+            break
+
+        # Create state tensor: [current_loss, best_loss, temperature]
+        state = torch.tensor([current_loss, self.best_loss, temperature],
+                             dtype=torch.float32)
+
+        # Get parameter distributions and sample actions
+        distributions = self.policy.get_distributions(state)
+        actions = [dist.sample() for dist in distributions]
+        log_probs = [dist.log_prob(action).sum() for dist, action in zip(distributions, actions)]
+
+        # Get value estimate
+        _, value = self.policy(state)
+
+        # Apply the sampled actions to the parameters
+        self.policy.apply_actions(actions)
+
+        # Evaluate new loss
+        new_loss = closure()
+
+        # Calculate reward: negative change in loss (improvement is positive reward)
+        reward = self.prev_loss - new_loss.item()
+
+        # Store experience in buffer
+        self.state_buffer.append(state)
+        self.action_buffer.append(actions)
+        self.log_prob_buffer.append(log_probs)
+        self.value_buffer.append(value)
+        self.reward_buffer.append(reward)
+        self.done_buffer.append(False)  # Episode not done until optimization ends
+
+        # Update previous loss
+        self.prev_loss = new_loss.item()
+
+        # Perform PPO update if we have enough experience
+        if len(self.state_buffer) >= self.update_freq:
+            self._update_policy()
+            self._clear_buffers()
+
+        # Cool down temperature
+        for group in self.param_groups:
+            group["temperature"] = max(
+                group["temperature"] * self.temp_decay,
+                group["min_temp"]
+            )
+
+        self.total_iterations += 1
+
+        return new_loss
+
+    def reset_to_best_params(self):
+        """Reset all parameters to the best ones found so far."""
+        for p in self.param_list:
+            param_id = id(p)
+            if param_id in self.best_params:
+                p.data.copy_(self.best_params[param_id])
+
+    def _compute_returns(self, rewards, values, dones):
+        """Compute returns and advantage estimates."""
+        returns = []
+        advantages = []
+
+        gae = 0
+        for i in reversed(range(len(rewards))):
+            next_value = values[i+1] if i < len(rewards) - 1 else 0
+            delta = rewards[i] + self.param_groups[0]["gamma"] * next_value * (1 - dones[i]) - values[i]
+            gae = delta + self.param_groups[0]["gamma"] * 0.95 * (1 - dones[i]) * gae
+            returns.insert(0, gae + values[i])
+            advantages.insert(0, gae)
+
+        return torch.tensor(returns), torch.tensor(advantages)
+
+    def _update_policy(self):
+        """Update the policy using PPO algorithm."""
+        # Convert buffers to tensors
+        states = torch.stack(self.state_buffer)
+        old_values = torch.cat(self.value_buffer)
+        rewards = torch.tensor(self.reward_buffer)
+        dones = torch.tensor(self.done_buffer)
+
+        # Compute returns and advantages
+        returns, advantages = self._compute_returns(
+            rewards.numpy(), old_values.detach().numpy(), dones.numpy()
+        )
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # PPO update for multiple epochs
+        epsilon = self.param_groups[0]["epsilon"]
+        for _ in range(self.param_groups[0]["epochs"]):
+            # Get new policy and value predictions
+            for state_batch, old_actions, old_log_probs, adv_batch, ret_batch in zip(
+                states, self.action_buffer, self.log_prob_buffer, advantages, returns):
+
+                # Forward pass
+                distributions = self.policy.get_distributions(state_batch)
+                _, new_value = self.policy(state_batch)
+
+                # Calculate log probabilities of old actions under new policy
+                new_log_probs = torch.stack([
+                    dist.log_prob(action).sum()
+                    for dist, action in zip(distributions, old_actions)
+                ])
+
+                # Calculate ratios
+                old_log_probs_tensor = torch.stack(old_log_probs)
+                ratios = torch.exp(new_log_probs - old_log_probs_tensor)
+
+                # Calculate surrogate losses
+                surr1 = ratios * adv_batch
+                surr2 = torch.clamp(ratios, 1-epsilon, 1+epsilon) * adv_batch
+
+                # Calculate actor and critic losses
+                actor_loss = -torch.min(surr1, surr2).mean()
+                critic_loss = nn.MSELoss()(new_value, ret_batch)
+                entropy = sum(dist.entropy().mean() for dist in distributions)
+
+                # Total loss
+                loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
+
+                # Update network
+                self.policy_optimizer.zero_grad()
+                loss.backward()
+                self.policy_optimizer.step()
 ```
 
-And now, let's modify the `train2d.py` file to use this PPO-based optimizer:
+This implementation:
+
+1. Creates a PPO optimizer that follows the same API as SimulatedAnnealing
+2. Uses a neural network to predict distributions over parameters
+3. Handles both categorical and continuous parameters
+4. Implements proper PPO with clipping, value function, and entropy regularization
+5. Uses temperature decay for exploration control
+6. Keeps track of best parameters found so far
+
+The key innovation is how it handles different parameter types:
+- For categorical parameters (like ClassesParameter), it predicts a probability distribution over possible values
+- For continuous parameters, it predicts means and standard deviations of Gaussian distributions
+
+Note that this is a sophisticated approach that might need some tuning for your specific problem, but the basic structure allows for a much more directed optimization strategy than traditional simulated annealing.
+
+## USER:
+
+Note that my problem is effectively stateless, so it's not a clear analogy to PPO. What I want is to train a network to estimate the parameters that produces a Fractal2DNonDiff network that minimizes the computed loss (which can't be estimated directly because it's not differentiable). Rethink your process completely.
+
+## ASSISTANT:
+
+You're right that this problem is quite different from the standard reinforcement learning setting where PPO is typically applied. Let me rethink the approach for your specific stateless parameter optimization problem.
+
+Here's a more focused solution that uses a neural network to directly predict good parameters without the full PPO machinery:
 
 ```python
-# In train2d.py, adjust the optimize_fractal_function function:
+import torch
+import torch.nn as nn
+from torch.optim import Optimizer
+import numpy as np
+from typing import Callable, Iterable, List, Dict, Any
 
-def optimize_fractal_function(
-    model: Fractal2DNonDiff,
-    max_depth: int,
-    target_image: torch.Tensor,
-    num_iterations: int = 2000,
-    adam_lr: float = 0.01,
-    ppo_lr: float = 0.01,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu",
-    plot_every_n: int = 50,
-    show_progress: bool = True,
-) -> Fractal2DNonDiff:
-    target_image = target_image.to(device=device, dtype=torch.long)
 
-    # Define the optimization parts
-    parts = [
-        # Use PPO for optimizing matrices
-        PPOOptimizerPart(
-            model=model,
-            max_depth=max_depth,
-            weight=1.0,
-            lr=ppo_lr,
-            clip_ratio=0.2,
-            entropy_coef=0.01,
-            value_coef=0.5,
-            iterations_per_reset=100,
-        ),
-    ]
+class ParameterPredictionNetwork(nn.Module):
+    def __init__(
+        self,
+        params: List[nn.Parameter],
+        hidden_size: int = 128,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+    ):
+        """
+        Neural network that directly predicts parameter values to minimize loss.
 
-    optimizer = Optimizer(parts, num_iterations=num_iterations)
+        Args:
+            params: List of parameters to optimize
+            hidden_size: Size of hidden layers
+            device: Device to run on
+        """
+        super().__init__()
+        self.device = device
+        self.params = params
 
-    best_loss = float('inf')
-    best_state = {}
+        # Store parameter metadata and build output structure
+        self.param_info = []
+        output_heads = nn.ModuleDict()
 
-    def compute_loss(predicted_image):
-        return 10 * (1 - (torch.sum(predicted_image == target_image) / len(predicted_image.flatten())))
+        for i, param in zip(range(len(params)), params):
+            is_categorical = getattr(param, "is_categorical", False)
+            num_categories = getattr(param, "get_num_categories", lambda: 0)()
+            param_name = getattr(param, "param_name", f"param_{i}")
 
-    def closure():
-        optimizer.zero_grad()
+            if is_categorical and num_categories > 0:
+                # For categorical parameters, output logits for each category for each element
+                if param.numel() == 1:  # Single categorical value
+                    output_dim = num_categories
+                    head = nn.Sequential(
+                        nn.Linear(hidden_size, hidden_size),
+                        nn.ReLU(),
+                        nn.Linear(hidden_size, output_dim)
+                    )
+                else:  # Multiple categorical values
+                    # For each element in the parameter, we need to predict a distribution
+                    head = nn.Sequential(
+                        nn.Linear(hidden_size, hidden_size),
+                        nn.ReLU(),
+                        nn.Linear(hidden_size, param.numel() * num_categories)
+                    )
+                    output_dim = param.numel() * num_categories
+            else:
+                # For continuous parameters, directly predict values
+                output_dim = param.numel()
+                head = nn.Sequential(
+                    nn.Linear(hidden_size, hidden_size),
+                    nn.ReLU(),
+                    nn.Linear(hidden_size, output_dim),
+                    nn.Sigmoid()  # Constrain to [0,1], we'll scale later
+                )
 
-        # Generate the fractal image
-        predicted_image = model(optimizer.max_depth)
+            self.param_info.append({
+                "id": id(param),
+                "name": param_name,
+                "is_categorical": is_categorical,
+                "num_categories": num_categories,
+                "shape": param.shape,
+                "numel": param.numel(),
+                "min": getattr(param, "min", 0.0),
+                "max": getattr(param, "max", 1.0),
+                "output_dim": output_dim
+            })
 
-        # Compute loss
-        loss = compute_loss(predicted_image)
+            output_heads[param_name] = head
+
+        # Network architecture
+        self.trunk = nn.Sequential(
+            nn.Linear(1, hidden_size),  # Input is current temperature
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+        )
+
+        self.output_heads = output_heads
+
+        # Move to device
+        self.to(device)
+
+    def forward(self, temperature: float) -> Dict[str, torch.Tensor]:
+        """
+        Predict parameter values.
+
+        Args:
+            temperature: Current temperature (used to control exploration)
+
+        Returns:
+            Dictionary of parameter predictions
+        """
+        # Create input tensor with temperature
+        x = torch.tensor([temperature], dtype=torch.float32, device=self.device)
+
+        # Get shared features
+        features = self.trunk(x)
+
+        # Generate outputs for each parameter
+        outputs = {}
+        for info in self.param_info:
+            name = info["name"]
+            head_output = self.output_heads[name](features)
+
+            if info["is_categorical"]:
+                # For categorical parameters, reshape to match the expected structure
+                if info["numel"] == 1:  # Single categorical value
+                    outputs[name] = head_output
+                else:
+                    # Reshape to [num_elements, num_categories]
+                    outputs[name] = head_output.reshape(-1, info["num_categories"])
+            else:
+                # For continuous parameters, scale to the appropriate range
+                min_val, max_val = info["min"], info["max"]
+                scaled_output = head_output * (max_val - min_val) + min_val
+                outputs[name] = scaled_output.reshape(info["shape"])
+
+        return outputs
+
+    def apply_predictions(self, outputs: Dict[str, torch.Tensor], noise_scale: float = 0.0):
+        """
+        Apply predicted parameter values with optional noise for exploration.
+
+        Args:
+            outputs: Dictionary of parameter predictions
+            noise_scale: Scale of noise to add (proportional to temperature)
+        """
+        with torch.no_grad():
+            for param, info in zip(self.params, self.param_info):
+                name = info["name"]
+                output = outputs[name]
+
+                # Store previous value for possible reversion
+                param.previous_value = param.detach().clone()
+
+                if info["is_categorical"]:
+                    # For categorical parameters, perform argmax or sampling
+                    if noise_scale > 0:
+                        # Sample from the categorical distribution with temperature
+                        logits = output / max(0.1, noise_scale)  # Temperature scaling
+
+                        if info["numel"] == 1:
+                            probs = torch.softmax(logits, dim=0)
+                            idx = torch.multinomial(probs, 1).item()
+                            param.data.fill_(idx)
+                        else:
+                            # Sample for each element in the parameter
+                            probs = torch.softmax(logits, dim=1)
+                            indices = torch.multinomial(probs, 1).squeeze(1)
+                            param.data.copy_(indices.reshape(param.shape))
+                    else:
+                        # Use argmax for deterministic prediction
+                        if info["numel"] == 1:
+                            idx = torch.argmax(output).item()
+                            param.data.fill_(idx)
+                        else:
+                            indices = torch.argmax(output, dim=1)
+                            param.data.copy_(indices.reshape(param.shape))
+                else:
+                    # For continuous parameters, apply with optional noise
+                    if noise_scale > 0:
+                        # Add noise scaled by temperature
+                        noise = torch.randn_like(output) * noise_scale * (info["max"] - info["min"])
+                        noisy_output = torch.clamp(output + noise, info["min"], info["max"])
+                        param.data.copy_(noisy_output)
+                    else:
+                        param.data.copy_(output)
+
+
+class NetworkGuidedOptimizer(Optimizer):
+    def __init__(
+        self,
+        params: Iterable[nn.Parameter],
+        num_iterations: int,
+        lr: float = 0.001,
+        initial_temp: float = 1.0,
+        min_temp: float = 0.01,
+        explore_steps: int = 50,
+        exploit_steps: int = 20,
+    ):
+        """
+        Optimizer that uses a neural network to predict parameters.
+
+        Args:
+            params: Parameters to optimize
+            num_iterations: Total number of optimization iterations
+            lr: Learning rate for the prediction network
+            initial_temp: Initial temperature for exploration
+            min_temp: Minimum temperature
+            explore_steps: Number of steps to gather experience before each training phase
+            exploit_steps: Number of steps to exploit current network before exploring again
+        """
+        self.param_list = list(params)
+        defaults = dict(
+            lr=lr,
+            temperature=initial_temp,
+            initial_temp=initial_temp,
+            min_temp=min_temp,
+        )
+        super().__init__(self.param_list, defaults)
+
+        # Create parameter prediction network
+        self.network = ParameterPredictionNetwork(self.param_list)
+        self.optimizer = torch.optim.Adam(self.network.parameters(), lr=lr)
+
+        # Temperature decay
+        cooling_steps = num_iterations * 0.8  # Use 80% of iterations for cooling
+        self.temp_decay = np.power(min_temp / initial_temp, 1.0 / cooling_steps)
+
+        # Track best parameters and loss
+        self.best_loss = float("inf")
+        self.best_params = {}
+
+        # Experience buffer for training
+        self.experiences = []
+
+        # Counters for explore/exploit phases
+        self.explore_steps = explore_steps
+        self.exploit_steps = exploit_steps
+        self.current_phase = "explore"
+        self.steps_in_phase = 0
+
+        # Total iterations
+        self.total_iterations = 0
+
+    def _store_experience(self, temperature, predictions, loss):
+        """Store experience for training."""
+        self.experiences.append({
+            "temperature": temperature,
+            "predictions": {k: v.detach().clone() for k, v in predictions.items()},
+            "loss": loss.item()
+        })
+
+    def _train_network(self):
+        """Train the network on collected experiences."""
+        if not self.experiences:
+            return
+
+        # Sort experiences by loss (best first)
+        sorted_exp = sorted(self.experiences, key=lambda x: x["loss"])
+
+        # Use only the best 20% experiences for training
+        num_best = max(1, int(len(sorted_exp) * 0.2))
+        best_exp = sorted_exp[:num_best]
+
+        # Train for multiple epochs
+        for _ in range(5):
+            for exp in best_exp:
+                self.optimizer.zero_grad()
+
+                # Forward pass
+                temperature = exp["temperature"]
+                predictions = self.network(temperature)
+
+                # Compute loss based on how well we can reproduce the good parameters
+                loss = 0
+                for name, pred in predictions.items():
+                    target = exp["predictions"][name]
+                    loss += torch.nn.functional.mse_loss(pred, target)
+
+                # Update network
+                loss.backward()
+                self.optimizer.step()
+
+        # Clear experience buffer
+        self.experiences = []
+
+    @torch.no_grad()
+    def step(self, closure: Callable[[], torch.FloatTensor] = None, plot_fn=None) -> torch.FloatTensor:
+        """
+        Perform a single optimization step.
+
+        Args:
+            closure: Function that evaluates the model and returns the loss
+            plot_fn: Optional function to call for visualization
+
+        Returns:
+            The loss value
+        """
+        assert closure is not None, "Closure must be provided"
+
+        # Get current temperature
+        for group in self.param_groups:
+            temperature = group["temperature"]
+            break
+
+        # Determine exploration noise based on phase
+        if self.current_phase == "explore":
+            noise_scale = temperature
+        else:  # exploit phase
+            noise_scale = temperature * 0.1  # Much less noise during exploitation
+
+        # Get parameter predictions from the network
+        predictions = self.network(temperature)
+
+        # Apply the predictions to the parameters with appropriate noise
+        self.network.apply_predictions(predictions, noise_scale)
+
+        # Evaluate new loss
+        loss = closure()
+
+        # Update best parameters if the current loss is better
+        if loss.item() < self.best_loss:
+            self.best_loss = loss.item()
+            self.best_params = {
+                id(p): p.detach().clone()
+                for p in self.param_list
+            }
+            # Call plot function if loss improved
+            if plot_fn:
+                plot_fn()
+
+        # Store experience for training
+        self._store_experience(temperature, predictions, loss)
+
+        # Update phase counter
+        self.steps_in_phase += 1
+
+        # Check if we should switch phases
+        if self.current_phase == "explore" and self.steps_in_phase >= self.explore_steps:
+            # Train network after exploration phase
+            self._train_network()
+            self.current_phase = "exploit"
+            self.steps_in_phase = 0
+            print(f"Switching to exploit phase (best loss: {self.best_loss:.6f})")
+        elif self.current_phase == "exploit" and self.steps_in_phase >= self.exploit_steps:
+            self.current_phase = "explore"
+            self.steps_in_phase = 0
+            print(f"Switching to explore phase (best loss: {self.best_loss:.6f})")
+
+        # Cool down temperature
+        for group in self.param_groups:
+            group["temperature"] = max(
+                group["temperature"] * self.temp_decay,
+                group["min_temp"]
+            )
+
+        self.total_iterations += 1
 
         return loss
 
-    for i in range(num_iterations):
-        plot_fn = lambda: model.plot_history(
-            depths=[optimizer.max_depth],
-            target_image=target_image,
-        )
-
-        loss = optimizer.step(closure, plot_fn)
-
-        # Track iteration for visualization
-        model.track_iteration(
-            iteration=i,
-            recon_loss=loss,
-        )
-
-        if plot_every_n > 0 and (i % plot_every_n == 0 or i == num_iterations - 1):
-            plot_fn()
-
-        if show_progress and (i % plot_every_n == 0 or i == num_iterations - 1):
-            print(f"Iteration {i}/{num_iterations}, Loss: {loss.item():.6f}, PPO, Max depth: {optimizer.max_depth}")
-
-        # Reset to best policy periodically
-        if i % 100 == 99:
-            ppo_optimizer = optimizer.current_optimizer
-            if hasattr(ppo_optimizer, 'reset_to_best'):
-                ppo_optimizer.reset_to_best()
-                if show_progress:
-                    print(f"Reset to best configuration (Loss: {ppo_optimizer.best_loss:.6f})")
-                    plot_fn()
-
-        # Save best state
-        if loss.item() < best_loss:
-            best_loss = loss.item()
-            best_state = {
-                'matrices_param': model.matrices_param.detach().clone(),
-            }
-
-    # Restore best state at the end
-    model.matrices_param.data.copy_(best_state['matrices_param'])
-
-    return model
+    def reset_to_best_params(self):
+        """Reset all parameters to the best ones found so far."""
+        for p in self.param_list:
+            param_id = id(p)
+            if param_id in self.best_params:
+                p.data.copy_(self.best_params[param_id])
 ```
 
-Key features of this PPO-based optimization approach:
+This approach is better suited to your stateless optimization problem:
 
-1. **Policy Network**: Learns a policy that generates probability distributions for matrix entries.
+1. Instead of PPO's actor-critic, it uses a direct parameter prediction network
+2. The network learns to map a temperature (which controls exploration) to good parameter values
+3. It alternates between exploration phases (gathering diverse experiences) and exploitation phases (using what it's learned)
+4. During exploration, it adds more noise to the predictions to search the space
+5. During exploitation, it uses the network with minimal noise to find the best parameters
+6. The network is trained on the best experiences to learn what parameters work well
 
-2. **Value Network**: Estimates expected "rewards" (negative loss) to guide the policy updates.
-
-3. **PPO Optimization**: Uses the PPO algorithm with clipping to update the policy in a stable way.
-
-4. **Constraint Enforcement**: Ensures that the modulo constraints between matrix entries are maintained.
-
-5. **Best State Tracking**: Remembers and can revert to the best configuration found so far.
-
-6. **Exploration vs. Exploitation**: The entropy coefficient balances between exploring new configurations and exploiting known good ones.
-
-The key advantage over simulated annealing is that PPO actually learns from past experience rather than just randomly trying configurations. This should lead to more efficient optimization, especially for complex fractal structures.
+This approach takes advantage of neural networks' ability to learn patterns in what makes good parameters without needing the full RL framework. The temperature-based exploration helps it balance between trying new things and exploiting what works.
 
 ## USER:

@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from func1d import generate_fractal_function
-from sa import PerturbableParameter, ValueMatricesParameter
+from sa import PerturbableParameter, ClassMatricesParameter
 
 
 class Fractal1D(nn.Module):
@@ -47,7 +47,7 @@ class Fractal1D(nn.Module):
             right_mat[i, torch.randint(0, self.num_values_with_dupes, (1,))] = 1.0
 
         matrices = torch.stack([left_mat, right_mat]).to(device)
-        self.matrices_param = ValueMatricesParameter(
+        self.matrices_param = ClassMatricesParameter(
             matrices, num_values=self.num_values, requires_grad=False,
         )
         # self.right_matrix = right_mat

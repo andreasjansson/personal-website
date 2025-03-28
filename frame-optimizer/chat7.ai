@@ -22,260 +22,18 @@ train2d.py:
 fractal2d_nondiff.py:
 <ai-context>/Users/andreas/projects/personal-website/frame-optimizer/fractal2d_nondiff.py</ai-context>
 
-implement the TODOs in perturb_row and in the Fractal2DNonDiff constructor. Change PerturbableParameter to handle integers as well as the floats it can currently handle (getting the type from the dtype of the wrapped tensor).
+fractal2d_diff.py:
+<ai-context>/Users/andreas/projects/personal-website/frame-optimizer/fractal2d_diff.py</ai-context>
+
+Fractal2DDiff.forward(depth, temperature=0.0001) (note the very low temperature, which should produce hard boundaries!) and Fractal2DNonDiff.forward(depth)  produces slightly different images, where the differences get more pronounced the higher the max_depth. I've converted a Fractal2DNonDiff to diff using model.to_diff(). Could it have to do with the < comparison in x_positions[horizontal_mask] < split_x[horizontal_mask], which may cause rounding differences compared to the diff version?
+
+In Fractal2DNonDiff, could you try making the split point logic more similar to the diff version?
 
 ## ASSISTANT:
 
-I'll implement the TODOs for `perturb_row` in `ValueMatricesParameter` and modify the `Fractal2DNonDiff` constructor according to your requirements. I'll also update `PerturbableParameter` to handle integer types.
+You're right that the difference between the two implementations might be related to how the splits are performed. Let's modify the Fractal2DNonDiff to make its split logic more similar to the differentiable version.
 
-First, let's update the `PerturbableParameter` class to handle integer types:
-
-```python
-class PerturbableParameter(nn.Parameter):
-    def __new__(cls, data, requires_grad=True, name=None, min=0.1, max=0.9):
-        return super(PerturbableParameter, cls).__new__(cls, data, requires_grad)
-
-    def __init__(self, data, requires_grad=True, name=None, min=0.1, max=0.9):
-        super(PerturbableParameter, self).__init__()
-        self.previous_value = None
-        self.param_name = name
-        self.min = min
-        self.max = max
-        self.is_integer = data.dtype in (torch.int, torch.int8, torch.int16,
-                                         torch.int32, torch.int64, torch.long)
-
-    def perturb(self, power: float) -> None:
-        # Store current value before perturbation
-        self.previous_value = self.detach().clone()
-
-        # Apply perturbation based on type
-        with torch.no_grad():
-            if self.is_integer:
-                # For integer parameters, use discrete perturbations
-                # Calculate how many elements to change based on power
-                num_elements = max(1, int(power * self.numel()))
-                # Select random indices to change
-                indices = torch.randperm(self.numel())[:num_elements]
-                # Reshape tensor to 1D for easy modification
-                flat_tensor = self.view(-1)
-                # Generate random integers within valid range for the selected indices
-                valid_range = int(self.max - self.min + 1)
-                new_values = torch.randint(int(self.min), int(self.max) + 1, (num_elements,),
-                                          device=self.device)
-                # Update selected elements
-                flat_tensor[indices] = new_values
-            else:
-                # For floating point parameters, use Gaussian noise
-                noise = torch.randn_like(self) * power
-                self.add_(noise)
-                self.clamp_(min=self.min, max=self.max)
-
-    def revert_perturbation(self) -> None:
-        if self.previous_value is not None:
-            with torch.no_grad():
-                self.copy_(self.previous_value)
-            self.previous_value = None
-```
-
-Now, let's modify the `perturb_row` method in `ValueMatricesParameter` to use class-based constraints:
-
-```python
-def perturb_row(self, row: int) -> None:
-    # Use the same class direction parameter to decide which matrix
-    # has the class constraint
-    if hasattr(self, 'same_class_direction'):
-        modulo_constrained_matrix = self.same_class_direction.item()
-    else:
-        # Fallback if same_class_direction not set
-        modulo_constrained_matrix = torch.randint(0, 2, (1,)).item()  # 0 or 1
-
-    # Get valid positions for both matrices (exclude diagonal if needed)
-    valid_positions = list(range(self.num_values_with_dupes))
-    if not self.allow_diagonal:
-        valid_positions.remove(row)
-
-    assert len(valid_positions) > 0
-
-    # For the modulo-constrained matrix, find positions with the same class
-    row_class = row % self.num_values
-    valid_modulo_positions = [
-        pos
-        for pos in valid_positions
-        if (pos % self.num_values) == row_class and pos != row
-    ]
-
-    assert len(valid_modulo_positions) > 0, f"No same-class positions found for row {row}, class {row_class}"
-
-    # Pick a random position with the same class
-    new_pos_modulo = valid_modulo_positions[
-        torch.randint(0, len(valid_modulo_positions), (1,)).item()
-    ]
-
-    # For the other matrix, pick any valid position (excluding row and new_pos_modulo)
-    valid_other_positions = [
-        pos for pos in valid_positions if pos != row and pos != new_pos_modulo
-    ]
-    assert len(valid_other_positions) > 0
-
-    new_pos_other = valid_other_positions[
-        torch.randint(0, len(valid_other_positions), (1,)).item()
-    ]
-
-    # Reset rows to zeros (inactive)
-    self[0][row, :] = 0.0
-    self[1][row, :] = 0.0
-
-    # Set the active element in each matrix
-    if modulo_constrained_matrix == 0:
-        self[0][row, new_pos_modulo] = 1.0
-        self[1][row, new_pos_other] = 1.0
-    else:
-        self[0][row, new_pos_other] = 1.0
-        self[1][row, new_pos_modulo] = 1.0
-```
-
-Now, let's update the `Fractal2DNonDiff` constructor to implement the TODO list:
-
-```python
-class Fractal2DNonDiff(nn.Module):
-    def __init__(
-        self,
-        num_classes: int,
-        num_values: int = None,
-        num_points_x: int = 100,
-        num_points_y: int = 100,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        dtype: torch.dtype = torch.float32,
-    ):
-        super().__init__()
-
-        # Ensure we have at least twice as many values as classes
-        if num_values is None:
-            num_values = num_classes * 2
-        assert num_values >= num_classes * 2, "num_values must be at least twice num_classes"
-
-        self.num_classes = num_classes
-        self.num_values = num_values
-        self.device = device
-        self.dtype = dtype
-        self.num_points_x = num_points_x
-        self.num_points_y = num_points_y
-
-        # Pre-generate fixed grid coordinates
-        x = torch.linspace(0, 1, num_points_x, device=device, dtype=dtype)
-        y = torch.linspace(0, 1, num_points_y, device=device, dtype=dtype)
-        self.grid_x, self.grid_y = torch.meshgrid(x, y, indexing="ij")
-        self.grid_points = torch.stack(
-            [self.grid_x.flatten(), self.grid_y.flatten()], dim=1
-        )
-
-        # Initialize split points (uniformly distributed between 0.2 and 0.8)
-        split_points = torch.rand(self.num_values, device=device, dtype=dtype) * 0.6 + 0.2
-        self.split_points_param = PerturbableParameter(
-            split_points,
-            requires_grad=True,
-            name="split_points",
-            min=0.1,
-            max=0.9
-        )
-
-        # Initialize split directions (0=horizontal, 1=vertical)
-        split_directions = torch.randint(
-            0, 2, (self.num_values,), device=device, dtype=torch.long
-        )
-        self.split_directions_param = PerturbableParameter(
-            split_directions,
-            requires_grad=False,  # Discrete parameter, no gradient
-            name="split_directions",
-            min=0,
-            max=1
-        )
-
-        # Initialize classes for each value index
-        # Ensure each class has at least 2 values
-        min_values_per_class = 2
-        values_per_class = num_values // num_classes
-        extra_values = num_values % num_classes
-
-        classes = []
-        for class_idx in range(num_classes):
-            # Determine how many values this class gets
-            class_values = values_per_class + (1 if class_idx < extra_values else 0)
-            # Add at least min_values_per_class values for this class
-            classes.extend([class_idx] * max(class_values, min_values_per_class))
-
-        # Shuffle the classes (in case we assigned extras)
-        classes = classes[:num_values]  # Ensure we have exactly num_values
-        classes = torch.tensor(classes, device=device, dtype=torch.long)
-        indices = torch.randperm(num_values, device=device)
-        classes = classes[indices]
-
-        self.classes_param = PerturbableParameter(
-            classes,
-            requires_grad=False,  # Discrete parameter, no gradient
-            name="classes",
-            min=0,
-            max=num_classes-1
-        )
-
-        # Initialize same_class_direction (0=left/up, 1=right/down)
-        same_class_direction = torch.randint(
-            0, 2, (1,), device=device, dtype=torch.long
-        )
-        self.same_class_direction = PerturbableParameter(
-            same_class_direction,
-            requires_grad=False,  # Discrete parameter, no gradient
-            name="same_class_direction",
-            min=0,
-            max=1
-        )
-
-        # Initialize tree transition matrices (for both left/right or top/bottom)
-        left_mat = torch.zeros(
-            self.num_values, self.num_values, dtype=self.dtype, device=device
-        )
-        right_mat = torch.zeros(
-            self.num_values, self.num_values, dtype=self.dtype, device=device
-        )
-
-        # Make one random element per row active, respecting class constraints
-        for i in range(self.num_values):
-            row_class = self.classes_param[i].item()
-
-            # Find indices of values with the same class
-            same_class_indices = (self.classes_param == row_class).nonzero().flatten()
-            same_class_indices = same_class_indices[same_class_indices != i]  # Exclude self
-
-            # Find indices of values with different classes
-            diff_class_indices = (self.classes_param != row_class).nonzero().flatten()
-
-            # Choose a random index for each matrix according to same_class_direction
-            if self.same_class_direction.item() == 0:  # Left/up maintains class
-                left_idx = same_class_indices[torch.randint(0, len(same_class_indices), (1,))].item()
-                right_idx = diff_class_indices[torch.randint(0, len(diff_class_indices), (1,))].item()
-            else:  # Right/down maintains class
-                left_idx = diff_class_indices[torch.randint(0, len(diff_class_indices), (1,))].item()
-                right_idx = same_class_indices[torch.randint(0, len(same_class_indices), (1,))].item()
-
-            left_mat[i, left_idx] = 1.0
-            right_mat[i, right_idx] = 1.0
-
-        matrices = torch.stack([left_mat, right_mat]).to(device=device, dtype=self.dtype)
-
-        # Create the matrices parameter that knows about class constraints
-        self.matrices_param = ValueMatricesParameter(
-            matrices,
-            num_values=self.num_classes,  # This now refers to num_classes not num_values
-            requires_grad=True,
-        )
-        # Attach the same_class_direction to the matrices parameter for use in perturb_row
-        self.matrices_param.same_class_direction = self.same_class_direction
-
-        # Initialize history dictionary
-        self.reset_history()
-```
-
-I've modified the `forward` method to use the new class-based approach:
+In the differentiable version, the splits use sigmoid to create a smooth transition, while the non-differentiable version uses a hard comparison. Even with a very low temperature, there might be slight numerical differences. Let's update the Fractal2DNonDiff forward method to make it closer to the differentiable implementation:
 
 ```python
 def forward(self, max_depth: int) -> torch.Tensor:
@@ -291,69 +49,41 @@ def forward(self, max_depth: int) -> torch.Tensor:
     x_positions = self.grid_points[:, 0]
     y_positions = self.grid_points[:, 1]
 
-    # Track bounding box for each point
-    # Start with the full [0,1] x [0,1] range for all points
-    min_x = torch.zeros_like(x_positions)
-    max_x = torch.ones_like(x_positions)
-    min_y = torch.zeros_like(y_positions)
-    max_y = torch.ones_like(y_positions)
-
     # Process all depths in sequence, but process all pixels in parallel
     for depth in range(max_depth):
         # Get split parameters for current nodes
-        curr_directions = self.split_directions_param[current_indices]
-        curr_split_points = self.split_points_param[current_indices]
-
-        # Calculate split positions in normalized coordinates
-        split_x = min_x + curr_split_points * (max_x - min_x)
-        split_y = min_y + curr_split_points * (max_y - min_y)
+        curr_directions = self.split_directions[current_indices]
+        curr_split_points = self.split_points[current_indices]
 
         # Determine which side of the split each pixel falls on
-        is_left = torch.zeros(batch_size, dtype=torch.bool, device=self.device)
-
         # For horizontal splits (direction=0): compare x position to split
-        horizontal_mask = curr_directions == 0
-        is_left[horizontal_mask] = (
-            x_positions[horizontal_mask] < split_x[horizontal_mask]
-        )
+        h_is_left = x_positions < curr_split_points
 
         # For vertical splits (direction=1): compare y position to split
-        vertical_mask = curr_directions == 1
-        is_left[vertical_mask] = y_positions[vertical_mask] < split_y[vertical_mask]
+        v_is_left = y_positions < curr_split_points
 
-        # Update bounding boxes based on the split direction and which side each point falls on
-        # For horizontal splits, update min_x or max_x
-        new_min_x = torch.where(horizontal_mask & ~is_left, split_x, min_x)
-        new_max_x = torch.where(horizontal_mask & is_left, split_x, max_x)
-
-        # For vertical splits, update min_y or max_y
-        new_min_y = torch.where(vertical_mask & ~is_left, split_y, min_y)
-        new_max_y = torch.where(vertical_mask & is_left, split_y, max_y)
-
-        min_x, max_x = new_min_x, new_max_x
-        min_y, max_y = new_min_y, new_max_y
+        # Blend based on direction (0=horizontal, 1=vertical)
+        is_left = torch.where(curr_directions == 0, h_is_left, v_is_left)
 
         # Determine child indices based on which side of the split
-        left_children = torch.argmax(self.left_matrix[current_indices], dim=1)
-        right_children = torch.argmax(self.right_matrix[current_indices], dim=1)
+        left_children = self.left_child_indices[current_indices]
+        right_children = self.right_child_indices[current_indices]
 
         # Update current indices based on which side of the split
         current_indices = torch.where(is_left, left_children, right_children)
 
     # After processing all depths, map to final class values
-    final_classes = self.classes_param[current_indices]
+    final_classes = self.classes[current_indices]
 
     # Reshape back to grid
     return final_classes.reshape(self.num_points_x, self.num_points_y)
 ```
 
-These changes implement all the requested TODOs:
-1. Replaced `num_values` and `num_dupes` with `num_classes` and `num_values`
-2. Added assertion to ensure `num_values >= num_classes * 2`
-3. Replaced `self.values` with `self.classes_param` (using long tensor)
-4. Added `same_class_direction` parameter as requested
-5. Made all parameters perturbable with appropriate types
-6. Initialized everything randomly while ensuring there are at least two values with the same class
-7. Modified `perturb_row` to use class constraints instead of modulo logic
+This modified implementation removes the bounding box updates and makes the split comparison directly with the original grid coordinates, which is more aligned with how the differentiable version works. The key differences:
+
+1. The original non-differentiable version calculated split positions based on normalized coordinates within the current bounding box.
+2. The new implementation uses the direct comparison of grid coordinates with split points, similar to the differentiable version.
+
+This should make the two implementations more consistent. The remaining difference is that the differentiable version uses sigmoid for smooth transitions, while this still uses hard comparisons, but with a very low temperature in the differentiable version, this difference should be minimal.
 
 ## USER:

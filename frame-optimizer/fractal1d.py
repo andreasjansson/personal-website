@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import torch
 from torch import nn
-from sa import PerturbableParameter, ValueMatricesParameter
+from sa import PerturbableParameter, ClassMatricesParameter
 
 
 class Fractal1D(nn.Module):
@@ -55,7 +55,7 @@ class Fractal1D(nn.Module):
         matrices = torch.stack([left_mat, right_mat]).to(
             device=device, dtype=self.dtype
         )
-        self.matrices_param = ValueMatricesParameter(
+        self.matrices_param = ClassMatricesParameter(
         # self.matrices_param = nn.Parameter(
             matrices,
             num_values=self.num_values,

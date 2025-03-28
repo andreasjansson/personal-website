@@ -7,24 +7,78 @@ from typing import Callable, Iterable
 
 
 class PerturbableParameter(nn.Parameter):
-    def __new__(cls, data, requires_grad=True, name=None, min=0.1, max=0.9):
+    def __new__(
+        cls,
+        data,
+        requires_grad=True,
+        name=None,
+        min: int | float = 0.1,
+        max: int | float = 0.9,
+    ):
         return super(PerturbableParameter, cls).__new__(cls, data, requires_grad)
 
-    def __init__(self, data, requires_grad=True, name=None, min=0.1, max=0.9):
+    def __init__(
+        self,
+        data,
+        requires_grad=True,
+        name=None,
+        min: int | float = 0.1,
+        max: int | float = 0.9,
+    ):
         super(PerturbableParameter, self).__init__()
         self.previous_value = None
         self.param_name = name
         self.min = min
         self.max = max
+        self.is_integer = data.dtype in (
+            torch.int,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+            torch.long,
+        )
+
+    @property
+    def is_categorical(self):
+        return self.is_integer
+
+    def get_num_categories(self) -> int:
+        """Return the number of possible values for categorical parameters"""
+        if not self.is_categorical:
+            return 0
+
+        # For integer parameters, return the number of possible values
+        return int(self.max - self.min + 1)
 
     def perturb(self, power: float) -> None:
         # Store current value before perturbation
         self.previous_value = self.detach().clone()
-        # Apply standard Gaussian perturbation
+
+        # Apply perturbation based on type
         with torch.no_grad():
-            noise = torch.randn_like(self) * power
-            self.add_(noise)
-            self.clamp_(min=self.min, max=self.max)
+            if self.is_integer:
+                # For integer parameters, use discrete perturbations
+                # Calculate how many elements to change based on power
+                num_elements = max(1, int(power * self.numel()))
+                # Select random indices to change
+                indices = torch.randperm(self.numel())[:num_elements]
+                # Reshape tensor to 1D for easy modification
+                flat_tensor = self.view(-1)
+                # Generate random integers within valid range for the selected indices
+                new_values = torch.randint(
+                    int(self.min),
+                    int(self.max) + 1,
+                    (num_elements,),
+                    device=self.device,
+                )
+                # Update selected elements
+                flat_tensor[indices] = new_values
+            else:
+                # For floating point parameters, use Gaussian noise
+                noise = torch.randn_like(self) * power
+                self.add_(noise)
+                self.clamp_(min=self.min, max=self.max)
 
     def revert_perturbation(self) -> None:
         if self.previous_value is not None:
@@ -33,122 +87,175 @@ class PerturbableParameter(nn.Parameter):
             self.previous_value = None
 
 
-class CategoricalMatrixParameter(PerturbableParameter):
-    def __init__(self, data, active=1.0, inactive=0.0, requires_grad=True):
-        super().__init__(data, requires_grad)
-        self.active = active
-        self.inactive = inactive
-        # self.allow_diagonal = allow_diagonal
-        self.allow_diagonal = False
-        # self.allow_diagonal = True
+class ClassesParameter(PerturbableParameter):
+    def __new__(
+        cls,
+        data,
+        num_classes: int,
+        requires_grad=False,
+        name=None,
+    ):
+        return super(ClassesParameter, cls).__new__(cls, data, requires_grad)
 
-        # Ensure diagonals are inactive if not allowed
-        if not self.allow_diagonal:
-            with torch.no_grad():
-                rows, cols = self.shape
-                for i in range(min(rows, cols)):
-                    self[i, i] = self.inactive
+    def __init__(
+        self,
+        data,
+        num_classes: int,
+        requires_grad=False,
+        name=None,
+    ):
+        """
+        A parameter for class assignments that ensures each class has at least two values.
+
+        Args:
+            data: Tensor of class assignments (integers)
+            num_classes: Number of distinct classes (0 to num_classes-1)
+            requires_grad: Whether parameter requires gradients (usually False for discrete values)
+            name: Optional name for the parameter
+        """
+        super().__init__(data, requires_grad, name, min=0, max=num_classes - 1)
+        self.num_classes = num_classes
+
+        # Verify initial state is valid
+        #self._verify_class_distribution()
+
+    @property
+    def is_categorical(self):
+        return True
+
+    def get_num_categories(self) -> int:
+        return self.num_classes
+
+    def _verify_class_distribution(self) -> None:
+        """Verify that each class has at least two representatives"""
+        for class_idx in range(self.num_classes):
+            count = torch.sum(self == class_idx).item()
+            if count < 2:
+                raise ValueError(
+                    f"Class {class_idx} has only {count} values. Each class must have at least 2 values."
+                )
 
     def perturb(self, power: float) -> None:
+        """
+        Perturb the class assignments while ensuring at least two values per class.
+        """
         # Store current value before perturbation
         self.previous_value = self.detach().clone()
 
         with torch.no_grad():
-            # Get the current matrix shape
-            rows, cols = self.shape
+            # Calculate how many elements to potentially change based on power
+            num_elements = max(1, int(power * self.numel()))
 
-            # For each row, randomly select which element to change
-            for row in range(rows):
-                # Random probability for this perturbation
-                if torch.rand(1).item() < power:  # Scale probability with power
-                    # Create valid positions (exclude diagonal if needed)
-                    valid_positions = list(range(cols))
-                    if not self.allow_diagonal and row < cols:
-                        valid_positions.remove(row)
+            # Select random indices to potentially change
+            indices = torch.randperm(self.numel())[:num_elements]
 
-                    # Skip if no valid positions (shouldn't happen with reasonable matrices)
-                    if not valid_positions:
-                        continue
+            for idx in indices:
+                # Get current class for this index
+                current_class = self[idx].item()
 
-                    # Pick a random new position to make active
-                    new_pos = valid_positions[
-                        torch.randint(0, len(valid_positions), (1,)).item()
+                # Count how many instances of this class we have
+                class_count = torch.sum(self == current_class).item()
+
+                # Only change if we have more than 2 of this class
+                if class_count > 2:
+                    # Choose a random new class
+                    possible_classes = list(range(self.num_classes))
+                    possible_classes.remove(current_class)
+                    new_class = possible_classes[
+                        torch.randint(0, len(possible_classes), (1,)).item()
                     ]
 
-                    # Reset row to inactive values
-                    self[row, :] = self.inactive
-                    self[row, new_pos] = self.active
+                    # Apply the change
+                    self[idx] = new_class
+
+    def revert_perturbation(self) -> None:
+        """Revert to previous state if perturbation is rejected"""
+        if self.previous_value is not None:
+            with torch.no_grad():
+                self.copy_(self.previous_value)
+            self.previous_value = None
 
 
-class ValueMatricesParameter(PerturbableParameter):
-    def __new__(cls, data, num_values: int, requires_grad=True, name=None):
-        return super(ValueMatricesParameter, cls).__new__(cls, data, requires_grad)
+class ChildIndicesParameter(PerturbableParameter):
+    def __new__(
+        cls,
+        data,
+        num_classes: int,
+        same_class_direction: torch.Tensor | nn.Parameter,
+        classes: torch.Tensor | nn.Parameter,
+        requires_grad=False,  # Typically false since these are discrete indices
+        name=None,
+    ):
+        return super(ChildIndicesParameter, cls).__new__(cls, data, requires_grad)
 
-    def __init__(self, data, num_values: int, requires_grad=True, name=None):
+    def __init__(
+        self,
+        data,
+        num_classes: int,
+        same_class_direction: torch.Tensor | nn.Parameter,
+        classes: torch.Tensor | nn.Parameter,
+        requires_grad=False,
+        name=None,
+    ):
         """
-        Parameter for managing paired left/right matrix values with specific constraints.
+        Parameter for managing child indices [left_children, right_children] with specific class constraints.
 
         Args:
-            data: Tensor of shape [2, rows, cols] containing [left_matrix, right_matrix]
-            requires_grad: Whether parameter requires gradients
+            data: Tensor of shape [2, num_values] containing [left_children, right_children] indices
+            num_classes: Number of distinct classes
+            same_class_direction: Which direction maintains the same class (0=left, 1=right)
+            classes: Class assignment for each value index
+            requires_grad: Whether parameter requires gradients (usually False for discrete indices)
             name: Optional name for the parameter
         """
         super().__init__(data, requires_grad, name)
-        self.num_values = num_values
-        self.num_values_with_dupes = data.shape[1]
-        assert self.num_values_with_dupes == data.shape[2]
-        assert data.shape[0] == 2
-        assert data.shape[1] % self.num_values == 0
-        self.num_dupes = data.shape[1] / self.num_values
-        self.allow_diagonal = False
+        self.num_classes = num_classes
+        self.same_class_direction = same_class_direction
+        self.classes = classes
+        self.num_values = self.classes.shape[0]
+        assert data.shape[0] == 2  # [left_children, right_children]
+        assert data.shape[1] == self.num_values
 
-    def __getitem__(self, idx):
-        return self.data[idx]
+    @property
+    def is_categorical(self):
+        return True
+
+    def get_num_categories(self) -> int:
+        return self.num_values
 
     def perturb(self, power: float) -> None:
         # Store current value before perturbation
         self.previous_value = self.detach().clone()
 
         with torch.no_grad():
-            for row in range(self.num_values_with_dupes):
+            for row in range(self.num_values):
                 # Random probability for this perturbation
                 if torch.rand(1).item() < power:  # Scale probability with power
                     self.perturb_row(row)
 
     def perturb_row(self, row: int) -> None:
-        # TODO: make self.same_class_direction a perturbale parameter
-        # on Fractal2DNonDiff, and make valid positions be positions
-        # where the class is the same (instead of the current modulo
-        # logic). guarantee that at least two values exist with the
-        # same class.
-
-        # Decide randomly which matrix to apply the modulo constraint to
-        modulo_constrained_matrix = torch.randint(0, 2, (1,)).item()  # 0 or 1
-
-        # Get valid positions for both matrices (exclude diagonal if needed)
-        valid_positions = list(range(self.num_values_with_dupes))
-        if not self.allow_diagonal:
-            valid_positions.remove(row)
+        # Get valid positions (exclude self)
+        valid_positions = list(range(self.num_values))
+        valid_positions.remove(row)  # Don't allow self-reference
 
         assert len(valid_positions) > 0
 
-        # For the modulo-constrained matrix:
-        valid_modulo_positions = [
-            pos
-            for pos in valid_positions
-            if (pos % self.num_values) == (row % self.num_values) and pos != row
+        row_class = self.classes[row]
+        valid_same_class_positions = [
+            pos for pos in valid_positions if self.classes[pos] == row_class
         ]
 
-        assert len(valid_modulo_positions) > 0
+        assert len(valid_same_class_positions) > 0, (
+            f"No same-class positions found for row {row}, class {row_class}"
+        )
 
-        # Pick a random position
-        new_pos_modulo = valid_modulo_positions[
-            torch.randint(0, len(valid_modulo_positions), (1,)).item()
+        # Pick a random position with the same class
+        new_pos_same_class = valid_same_class_positions[
+            torch.randint(0, len(valid_same_class_positions), (1,)).item()
         ]
 
-        # For the other matrix, just pick any valid position (excluding row)
         valid_other_positions = [
-            pos for pos in valid_positions if pos != row and pos != new_pos_modulo
+            pos for pos in valid_positions if pos != new_pos_same_class
         ]
         assert len(valid_other_positions) > 0
 
@@ -156,17 +263,13 @@ class ValueMatricesParameter(PerturbableParameter):
             torch.randint(0, len(valid_other_positions), (1,)).item()
         ]
 
-        # Reset rows to zeros (inactive)
-        self[0][row, :] = 0.0
-        self[1][row, :] = 0.0
-
-        # Set the active element in each matrix
-        if modulo_constrained_matrix == 0:
-            self[0][row, new_pos_modulo] = 1.0
-            self[1][row, new_pos_other] = 1.0
+        # Update child indices based on same_class_direction
+        if self.same_class_direction[row] == 0:
+            self[0, row] = new_pos_same_class
+            self[1, row] = new_pos_other
         else:
-            self[0][row, new_pos_other] = 1.0
-            self[1][row, new_pos_modulo] = 1.0
+            self[0, row] = new_pos_other
+            self[1, row] = new_pos_same_class
 
 
 class SimulatedAnnealing(Optimizer):

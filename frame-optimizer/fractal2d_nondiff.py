@@ -1,20 +1,16 @@
 import torch
 from torch import nn
 import numpy as np
-from sa import PerturbableParameter, ValueMatricesParameter
+from sa import PerturbableParameter, ChildIndicesParameter, ClassesParameter
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
 
 class Fractal2DNonDiff(nn.Module):
-    """
-    2D fractal function with both horizontal and vertical splits.
-    """
-
     def __init__(
         self,
+        num_classes: int,
         num_values: int,
-        num_dupes: int = 2,
         num_points_x: int = 100,
         num_points_y: int = 100,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
@@ -22,21 +18,12 @@ class Fractal2DNonDiff(nn.Module):
     ):
         super().__init__()
 
-        # TODO:
-        # * replace num_values and num_dupes with num_classes and num_values
-        # * assert num_values >= num_classes * 2
-        # * replace self.values with self.classes (long)
-        # * make a same_class_direction (left/up or right/down) (int, 0/1) instead of mod constraints in perturb_row
-        # * make self.classes, self.split_points, self.split_directions, self.same_class_direction perturbable parameters (with custom perturb classes?)
-        # * initialize self.classes, self.split_points, self.split_directions, self.same_class_direction randomly (replacing the current initialization), as long as there are at least two values with the same class
-        # That way more common classes can have more values to create complex shapes
+        #assert num_values >= num_classes * 2, (
+        #    "num_values must be at least twice num_classes"
+        #)
 
-        assert num_dupes > 0
-        assert num_dupes % 2 == 0
-
+        self.num_classes = num_classes
         self.num_values = num_values
-        self.num_dupes = num_dupes
-        self.num_values_with_dupes = self.num_values * self.num_dupes
         self.device = device
         self.dtype = dtype
         self.num_points_x = num_points_x
@@ -50,52 +37,109 @@ class Fractal2DNonDiff(nn.Module):
             [self.grid_x.flatten(), self.grid_y.flatten()], dim=1
         )
 
-        base_split_points = torch.linspace(
-            0, 1, (num_dupes // 2) + 2, device=device, dtype=self.dtype
-        )[1:-1]
-        mid_idx = len(base_split_points) // 2
-        base_split_points = torch.cat(
-            [
-                base_split_points[mid_idx : mid_idx + 1],
-                base_split_points[:mid_idx],
-                base_split_points[mid_idx + 1 :],
-            ]
+        # Initialize split points (uniformly distributed between 0.2 and 0.8)
+        split_points = (
+            torch.rand(self.num_values, device=device, dtype=dtype) * 0.6 + 0.2
         )
-        split_points = []
-        split_directions = []
-        values = []
-        for dupe in range(num_dupes):
-            split_point = base_split_points[dupe // 2]
-            split_direction = dupe % 2
-            for value in range(num_values):
-                split_points.append(split_point)
-                split_directions.append(split_direction)
-                values.append(value)
-
-        self.split_points_param = torch.tensor(split_points).to(device=device, dtype=dtype)
-        self.split_directions = torch.tensor(split_directions).to(device=device, dtype=dtype)
-        self.values = torch.tensor(values).to(device=device, dtype=dtype)
-
-        # Initialize tree transition matrices (for both left/right or top/bottom)
-        left_mat = torch.zeros(
-            self.num_values_with_dupes, self.num_values_with_dupes, dtype=self.dtype
-        )
-        right_mat = torch.zeros(
-            self.num_values_with_dupes, self.num_values_with_dupes, dtype=self.dtype
+        self.split_points = PerturbableParameter(
+            split_points, requires_grad=False, name="split_points", min=0.1, max=0.9
         )
 
-        # Make one random element per row active
-        for i in range(self.num_values_with_dupes):
-            left_mat[i, torch.randint(0, self.num_values_with_dupes, (1,))] = 1.0
-            right_mat[i, torch.randint(0, self.num_values_with_dupes, (1,))] = 1.0
-
-        matrices = torch.stack([left_mat, right_mat]).to(
-            device=device, dtype=self.dtype
+        # Initialize split directions (0=horizontal, 1=vertical)
+        split_directions = torch.randint(
+            0, 2, (self.num_values,), device=device, dtype=torch.long
         )
-        self.matrices_param = ValueMatricesParameter(
-            matrices,
-            num_values=self.num_values,
-            requires_grad=True,
+        self.split_directions = PerturbableParameter(
+            split_directions,
+            requires_grad=False,  # Discrete parameter, no gradient
+            name="split_directions",
+            min=0,
+            max=1,
+        )
+
+        # Initialize classes for each value index
+        # Ensure each class has at least 2 values
+        min_values_per_class = 2
+        values_per_class = num_values // num_classes
+        extra_values = num_values % num_classes
+
+        classes = []
+        for class_idx in range(num_classes):
+            # Determine how many values this class gets
+            class_values = values_per_class + (1 if class_idx < extra_values else 0)
+            # Add at least min_values_per_class values for this class
+            classes.extend([class_idx] * max(class_values, min_values_per_class))
+
+        # Shuffle the classes (in case we assigned extras)
+        classes = classes[:num_values]  # Ensure we have exactly num_values
+        classes = torch.tensor(classes, device=device, dtype=torch.long)
+        indices = torch.randperm(num_values, device=device)
+        classes = classes[indices]
+
+        self.classes = ClassesParameter(
+            classes,
+            num_classes=num_classes,
+            requires_grad=False,  # Discrete parameter, no gradient
+            name="classes",
+        )
+
+        # Initialize same_class_direction (0=left/up, 1=right/down)
+        same_class_direction = torch.randint(
+            0, 2, (self.num_values,), device=device, dtype=torch.long
+        )
+        self.same_class_direction = PerturbableParameter(
+            same_class_direction,
+            requires_grad=False,  # Discrete parameter, no gradient
+            name="same_class_direction",
+            min=0,
+            max=1,
+        )
+
+        left_children = torch.zeros(self.num_values, dtype=torch.long, device=device)
+        right_children = torch.zeros(self.num_values, dtype=torch.long, device=device)
+
+        # Set children indices respecting class constraints
+        for i in range(self.num_values):
+            row_class = self.classes[i].item()
+
+            # Find indices of values with the same class
+            same_class_indices = (self.classes == row_class).nonzero().flatten()
+            same_class_indices = same_class_indices[
+                same_class_indices != i
+            ]  # Exclude self
+
+            # Find indices of values with different classes
+            diff_class_indices = (self.classes != row_class).nonzero().flatten()
+
+            # Choose a random index for each direction according to same_class_direction
+            if self.same_class_direction[i] == 0:  # Left/up maintains class
+                left_idx = same_class_indices[
+                    torch.randint(0, len(same_class_indices), (1,))
+                ].item()
+                right_idx = diff_class_indices[
+                    torch.randint(0, len(diff_class_indices), (1,))
+                ].item()
+            else:  # Right/down maintains class
+                left_idx = diff_class_indices[
+                    torch.randint(0, len(diff_class_indices), (1,))
+                ].item()
+                right_idx = same_class_indices[
+                    torch.randint(0, len(same_class_indices), (1,))
+                ].item()
+
+            left_children[i] = left_idx
+            right_children[i] = right_idx
+
+        children = torch.stack([left_children, right_children])
+
+        # Create the children parameter that knows about class constraints
+        self.child_indices = ChildIndicesParameter(
+            children,
+            num_classes=self.num_classes,
+            same_class_direction=self.same_class_direction,
+            classes=self.classes,
+            requires_grad=False,  # Discrete indices, no gradient
+            name="child_indices",
         )
 
         # Initialize history dictionary
@@ -107,25 +151,62 @@ class Fractal2DNonDiff(nn.Module):
             "loss": [],
             "split_points": [],
             "values": [],
-            "left_matrix": [],
-            "right_matrix": [],
+            "left_children": [],
+            "right_children": [],
             "iterations": [],
         }
 
     @property
-    def split_points(self) -> torch.Tensor:
-        # return torch.sigmoid(torch.clamp(self.split_points_param, 0, 1) * 4 - 2)
-        return self.split_points_param
+    def left_child_indices(self) -> torch.Tensor:
+        return self.child_indices[0]
 
     @property
-    def left_matrix(self) -> torch.Tensor:
-        return self.matrices_param[0]
-
-    @property
-    def right_matrix(self) -> torch.Tensor:
-        return self.matrices_param[1]
+    def right_child_indices(self) -> torch.Tensor:
+        return self.child_indices[1]
 
     def forward(self, max_depth: int) -> torch.Tensor:
+        """
+        Parallel implementation of fractal generation using GPU
+        """
+        batch_size = self.num_points_x * self.num_points_y
+
+        # Initialize with all pixels assigned to the root node (index 0)
+        current_indices = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+
+        # Use pre-computed grid points
+        x_positions = self.grid_points[:, 0]
+        y_positions = self.grid_points[:, 1]
+
+        # Process all depths in sequence, but process all pixels in parallel
+        for depth in range(max_depth):
+            # Get split parameters for current nodes
+            curr_directions = self.split_directions[current_indices]
+            curr_split_points = self.split_points[current_indices]
+
+            # Determine which side of the split each pixel falls on
+            # For horizontal splits (direction=0): compare x position to split
+            h_is_left = x_positions < curr_split_points
+
+            # For vertical splits (direction=1): compare y position to split
+            v_is_left = y_positions < curr_split_points
+
+            # Blend based on direction (0=horizontal, 1=vertical)
+            is_left = torch.where(curr_directions == 0, h_is_left, v_is_left)
+
+            # Determine child indices based on which side of the split
+            left_children = self.left_child_indices[current_indices]
+            right_children = self.right_child_indices[current_indices]
+
+            # Update current indices based on which side of the split
+            current_indices = torch.where(is_left, left_children, right_children)
+
+        # After processing all depths, map to final class values
+        final_classes = self.classes[current_indices]
+
+        # Reshape back to grid
+        return final_classes.reshape(self.num_points_x, self.num_points_y)
+
+    def forward_old(self, max_depth: int) -> torch.Tensor:
         """
         Parallel implementation of fractal generation using GPU
         """
@@ -160,6 +241,7 @@ class Fractal2DNonDiff(nn.Module):
 
             # For horizontal splits (direction=0): compare x position to split
             horizontal_mask = curr_directions == 0
+
             is_left[horizontal_mask] = (
                 x_positions[horizontal_mask] < split_x[horizontal_mask]
             )
@@ -181,139 +263,18 @@ class Fractal2DNonDiff(nn.Module):
             min_y, max_y = new_min_y, new_max_y
 
             # Determine child indices based on which side of the split
-            left_children = torch.argmax(self.left_matrix[current_indices], dim=1)
-            right_children = torch.argmax(self.right_matrix[current_indices], dim=1)
+            left_children = self.left_child_indices[current_indices]
+            right_children = self.right_child_indices[current_indices]
 
             # Update current indices based on which side of the split
             current_indices = torch.where(is_left, left_children, right_children)
 
-        # After processing all depths, map to final values
-        final_values = self.values[current_indices]
+        # After processing all depths, map to final class values
+        final_classes = self.classes[current_indices]
 
         # Reshape back to grid
-        return final_values.reshape(self.num_points_x, self.num_points_y)
+        return final_classes.reshape(self.num_points_x, self.num_points_y)
 
-    def forward_old(self, max_depth: int) -> torch.Tensor:
-        """
-        Generate a 2D fractal image.
-
-        Args:
-            max_depth: Maximum recursion depth
-
-        Returns:
-            Tensor of shape [num_points_x, num_points_y] containing class indices
-        """
-        # Pre-allocate result tensor
-        result = torch.zeros(
-            (self.num_points_x, self.num_points_y),
-            device=self.device,
-            dtype=self.dtype,
-        )
-
-        # Start with the entire grid
-        self.generate_recursive(
-            parent_idx=0,
-            x_start=0,
-            x_end=self.num_points_x,
-            y_start=0,
-            y_end=self.num_points_y,
-            depth=0,
-            max_depth=max_depth,
-            result=result,
-        )
-
-        return result
-
-    def generate_recursive(
-        self,
-        parent_idx: int,
-        x_start: int,
-        x_end: int,
-        y_start: int,
-        y_end: int,
-        depth: int,
-        max_depth: int,
-        result: torch.Tensor,
-    ) -> None:
-        """
-        Recursively evaluate 2D fractal function using integer indices.
-        """
-        # Skip if empty region
-        if x_start >= x_end or y_start >= y_end:
-            return
-
-        # At maximum depth, directly set the values
-        if depth == max_depth:
-            value_idx = parent_idx % self.num_values
-            result[x_start:x_end, y_start:y_end] = value_idx
-            return
-
-        # Get split direction (0=horizontal, 1=vertical)
-        split_direction = self.split_directions[parent_idx]
-
-        # Calculate split position
-        split_ratio = self.split_points[parent_idx]
-
-        # Get child indices
-        left_child_idx = torch.argmax(self.left_matrix[parent_idx]).item()
-        right_child_idx = torch.argmax(self.right_matrix[parent_idx]).item()
-
-        if split_direction == 0:  # Horizontal split (left/right)
-            # Convert ratio to integer split point
-            x_split = x_start + int((x_end - x_start) * split_ratio)
-            x_split = max(x_start + 1, min(x_split, x_end - 1))  # Ensure valid split
-
-            # Process left side
-            self.generate_recursive(
-                parent_idx=left_child_idx,
-                x_start=x_start,
-                x_end=x_split,
-                y_start=y_start,
-                y_end=y_end,
-                depth=depth + 1,
-                max_depth=max_depth,
-                result=result,
-            )
-
-            # Process right side
-            self.generate_recursive(
-                parent_idx=right_child_idx,
-                x_start=x_split,
-                x_end=x_end,
-                y_start=y_start,
-                y_end=y_end,
-                depth=depth + 1,
-                max_depth=max_depth,
-                result=result,
-            )
-        else:  # Vertical split (top/bottom)
-            # Convert ratio to integer split point
-            y_split = y_start + int((y_end - y_start) * split_ratio)
-            y_split = max(y_start + 1, min(y_split, y_end - 1))  # Ensure valid split
-
-            # Process top side
-            self.generate_recursive(
-                parent_idx=left_child_idx,  # We reuse left_matrix for top
-                x_start=x_start,
-                x_end=x_end,
-                y_start=y_start,
-                y_end=y_split,
-                depth=depth + 1,
-                max_depth=max_depth,
-                result=result,
-            )
-
-            # Process bottom side
-            self.generate_recursive(
-                parent_idx=right_child_idx,  # We reuse right_matrix for bottom
-                x_start=x_start,
-                x_end=x_end,
-                y_start=y_split,
-                y_end=y_end,
-                depth=depth + 1,
-                max_depth=max_depth,
-                result=result,
-            )
 
     def track_iteration(
         self,
@@ -321,11 +282,9 @@ class Fractal2DNonDiff(nn.Module):
         recon_loss: torch.Tensor,
     ):
         self.history["loss"].append(recon_loss.item())
-        self.history["split_points"].append(
-            self.split_points_param.detach().cpu().numpy()
-        )
-        self.history["left_matrix"].append(self.left_matrix.detach().cpu().numpy())
-        self.history["right_matrix"].append(self.right_matrix.detach().cpu().numpy())
+        self.history["split_points"].append(self.split_points.detach().cpu().numpy())
+        self.history["left_children"] = self.left_child_indices.detach().cpu().numpy()
+        self.history["right_children"] = self.right_child_indices.detach().cpu().numpy()
         self.history["iterations"].append(iteration)
 
     def plot_history(
@@ -335,6 +294,8 @@ class Fractal2DNonDiff(nn.Module):
         color_map: np.ndarray | None = None,
     ):
         """Visualize the current fractal structure alongside the target image with loss history"""
+        iteration = self.history["iterations"][-1] if len(self.history["iterations"]) else 0
+
         # Generate outputs at different depths
         with torch.no_grad():
             outputs = {depth: self(depth) for depth in depths}
@@ -356,7 +317,7 @@ class Fractal2DNonDiff(nn.Module):
             )
             ax_loss.set_xlabel("Iteration")
             ax_loss.set_ylabel("Loss")
-            ax_loss.set_title("Optimization Progress")
+            ax_loss.set_title(f"Loss (iteration {iteration})")
             ax_loss.grid(True)
         else:
             ax_loss.text(
@@ -371,7 +332,7 @@ class Fractal2DNonDiff(nn.Module):
             colors = ListedColormap(color_map / 255.0)
         else:
             # Use default colormap
-            colors = plt.cm.get_cmap("tab10", self.num_values)
+            colors = plt.cm.get_cmap("tab10", self.num_classes)
 
         # First plot target image
         target_img = target_image.cpu().numpy()
@@ -387,7 +348,7 @@ class Fractal2DNonDiff(nn.Module):
             origin="upper",
             extent=[0, 1, 0, 1],
             vmin=0,
-            vmax=self.num_values - 1,
+            vmax=self.num_classes - 1,
         )
         ax_target.set_title("Target Image")
         ax_target.set_xlabel("X")
@@ -409,7 +370,7 @@ class Fractal2DNonDiff(nn.Module):
                 origin="upper",
                 extent=[0, 1, 0, 1],
                 vmin=0,
-                vmax=self.num_values - 1,
+                vmax=self.num_classes - 1,
             )
 
             # Calculate accuracy
@@ -427,3 +388,51 @@ class Fractal2DNonDiff(nn.Module):
 
         plt.tight_layout()
         plt.show()
+
+    def to_diff(self) -> 'Fractal2DDiff':
+        """Convert this non-differentiable fractal model to a differentiable version."""
+        from fractal2d_diff import Fractal2DDiff
+
+        # Create a new differentiable model with the same dimensions
+        diff_model = Fractal2DDiff(
+            num_classes=self.num_classes,
+            num_values=self.num_values,
+            num_points_x=self.num_points_x,
+            num_points_y=self.num_points_y,
+            device=self.device,
+            dtype=self.dtype
+        )
+
+        # Transfer split points directly
+        diff_model.split_points.data.copy_(self.split_points.data)
+
+        # Convert discrete split directions to continuous logits
+        # Use high values to ensure sigmoid gives values close to 0 or 1
+        direction_logits = torch.where(
+            self.split_directions.data == 0,
+            torch.tensor(-10.0, device=self.device, dtype=self.dtype),
+            torch.tensor(10.0, device=self.device, dtype=self.dtype)
+        )
+        diff_model.split_directions_logits.data.copy_(direction_logits)
+
+        # Initialize class logits to create a sharp distribution
+        # For each value, create a one-hot-like distribution of class probabilities
+        for value_idx in range(self.num_values):
+            class_idx = self.classes[value_idx].item()
+            # Set high logit for the assigned class, low for others
+            diff_model.class_logits.data[value_idx] = -10.0
+            diff_model.class_logits.data[value_idx, class_idx] = 10.0
+
+        # Initialize child selection weights based on current child indices
+        for value_idx in range(self.num_values):
+            # Get current left and right child indices
+            left_child = self.left_child_indices[value_idx].item()
+            right_child = self.right_child_indices[value_idx].item()
+
+            # Initialize logits (negative values for all, high positive for selected child)
+            diff_model.child_selection_logits.data[value_idx, 0] = -10.0
+            diff_model.child_selection_logits.data[value_idx, 1] = -10.0
+            diff_model.child_selection_logits.data[value_idx, 0, left_child] = 10.0
+            diff_model.child_selection_logits.data[value_idx, 1, right_child] = 10.0
+
+        return diff_model

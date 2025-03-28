@@ -106,7 +106,7 @@ def random_curve(n=50, noise_level=0.2):
 def generate_target_image(
     height: int = 100,
     width: int = 100,
-    num_values: int = 3,
+    num_classes: int = 3,
     pattern_type: str = "circles",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ):
@@ -132,7 +132,7 @@ def generate_target_image(
         )
         distance = torch.sqrt(x**2 + y**2)
         # Create rings
-        target = (distance * num_values).floor().remainder(num_values).long()
+        target = (distance * num_classes).floor().remainder(num_classes).long()
 
     elif pattern_type == "squares":
         # Create nested squares
@@ -143,16 +143,16 @@ def generate_target_image(
         )
         # Use max distance from center (L∞ norm)
         distance = torch.maximum(torch.abs(x), torch.abs(y))
-        target = (distance * num_values * 1.5).floor().remainder(num_values).long()
+        target = (distance * num_classes * 1.5).floor().remainder(num_classes).long()
 
     elif pattern_type == "stripes":
         # Create diagonal stripes
         y, x = torch.meshgrid(
-            torch.linspace(0, num_values, height, device=device),
-            torch.linspace(0, num_values, width, device=device),
+            torch.linspace(0, num_classes, height, device=device),
+            torch.linspace(0, num_classes, width, device=device),
             indexing="ij",
         )
-        target = ((x + y) % num_values).long()
+        target = ((x + y) % num_classes).long()
 
     elif pattern_type == "checkerboard":
         # Create checkerboard pattern
@@ -161,13 +161,13 @@ def generate_target_image(
             torch.arange(width, device=device),
             indexing="ij",
         )
-        block_size = min(height, width) // (num_values * 2)
+        block_size = min(height, width) // (num_classes * 2)
         if block_size < 1:
             block_size = 1
-        target = (((y // block_size) + (x // block_size)) % num_values).long()
+        target = (((y // block_size) + (x // block_size)) % num_classes).long()
 
     else:
         # Random pattern as fallback
-        target = torch.randint(0, num_values, (height, width), device=device)
+        target = torch.randint(0, num_classes, (height, width), device=device)
 
     return target
