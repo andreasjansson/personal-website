@@ -165,7 +165,16 @@ def value_count_loss(
 import matplotlib.pyplot as plt
 
 
-def train_fractal(model, target_image, num_iterations=100, lr=0.005, temperature_start=0.2, temperature_end=0.004, plot_every_n=10):
+def train_fractal(
+    model,
+    target_image,
+    num_iterations=100,
+    lr=0.005,
+    temperature_start=0.2,
+    temperature_end=0.004,
+    plot_every_n=10,
+    color_map=None,
+):
     """
     Train the fractal model to match the target image.
 
@@ -179,10 +188,11 @@ def train_fractal(model, target_image, num_iterations=100, lr=0.005, temperature
     Returns:
         Trained model and loss history
     """
+    print("starting training")
+
     # Prepare target
     target = target_image.to(model.device)
     target_flat = target.reshape(-1)
-
 
     # Define optimizer and loss function
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -193,9 +203,10 @@ def train_fractal(model, target_image, num_iterations=100, lr=0.005, temperature
 
     # Training loop
     for i in range(num_iterations):
-
         progress = min(1.0, i / (0.8 * num_iterations))
-        temperature = temperature_start * (temperature_end / temperature_start) ** progress
+        temperature = (
+            temperature_start * (temperature_end / temperature_start) ** progress
+        )
 
         optimizer.zero_grad()
 
@@ -217,7 +228,12 @@ def train_fractal(model, target_image, num_iterations=100, lr=0.005, temperature
 
         model.track_iteration(i, loss)
         if (i + 1) % plot_every_n == 0:
-            model.plot_history([max_depth, max_depth + 2], target_image=target_image, temperature=temperature)
+            model.plot_history(
+                [max_depth, max_depth + 2],
+                target_image=target_image,
+                temperature=temperature,
+                color_map=color_map,
+            )
 
     return model, loss_history
 
