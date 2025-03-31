@@ -37,8 +37,15 @@ class DynamicSystemTrainer:
         cycle_length: int = 10,
         width: int = 128,
         height: int = 128,
+        max_variables: int = 50,
     ):
         self.model = model
+
+        num_variables = self.count_variables()
+        assert num_variables < max_variables, (
+            f"The model has {num_variables} variables (including number of elements in tensors), maximum is {max_variables}"
+        )
+
         self.width = width
         self.height = height
         self.optimizer = optimizer_cls(model.parameters(), **optimizer_kwargs)
@@ -47,6 +54,10 @@ class DynamicSystemTrainer:
             self.scheduler = scheduler_cls(self.optimizer, **scheduler_kwargs)
         self.cycle_length = cycle_length
         self.loss_fn = nn.MSELoss()
+
+    def count_variables(self) -> int:
+        """Count the total number of trainable parameters in the model."""
+        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
     def train_morphing(
         self,
@@ -131,7 +142,9 @@ class DynamicSystemTrainer:
             frames = []
             for _ in range(self.cycle_length * num_cycles):
                 self.model.step()
-                frames.append(self.model.get_image(self.width, self.height).detach().cpu().numpy())
+                frames.append(
+                    self.model.get_image(self.width, self.height).detach().cpu().numpy()
+                )
         return frames
 
     def frame_distances_to_target(
@@ -259,7 +272,9 @@ class DynamicSystemTrainer:
             # Run for specified number of steps
             for _ in range(num_steps):
                 self.model.step()
-                frames.append(self.model.get_image(self.width, self.height).detach().cpu().numpy())
+                frames.append(
+                    self.model.get_image(self.width, self.height).detach().cpu().numpy()
+                )
 
             # Display frames in a grid
             rows = (num_steps + 3) // 4  # Ceiling division
@@ -294,9 +309,7 @@ def main():
     print("\nTraining...")
     model = MyDynamicSystem().to("cuda")  # TODO
     trainer = DynamicSystemTrainer(
-        model=model,
-        cycle_length=12,
-        width=width, height=height
+        model=model, cycle_length=12, width=width, height=height
     )
 
     # Show initial state

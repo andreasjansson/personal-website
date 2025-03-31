@@ -8,9 +8,14 @@ from PIL import Image
 import traceback
 import anthropic
 from anthropic import RateLimitError
+from google import genai
+from google.genai.types import GenerateContentConfig
+
 
 from dynsys import *
 from sample_data import create_target_images
+
+MAX_VARIABLES = 100
 
 
 class Failed(Exception):
@@ -19,16 +24,18 @@ class Failed(Exception):
 
 def generate_and_train_dynamic_system(
     anthropic_client: anthropic.Anthropic,
-    google_client,
+    code_client: genai.Client | anthropic.Client,
     num_attempts: int = 100,
     width: int = 128,
     height: int = 128,
     max_iterations: int = 1000,
 ) -> DynamicSystem:
+    print("starting...")
+
     system_prompt = make_system_prompt()
 
     messages = initial_messages()
-    system_code = generate_code(anthropic_client, system_prompt, messages)
+    system_code = generate_code(code_client, system_prompt, messages)
 
     # Try to train the system for several attempts
     for attempt in range(num_attempts):
@@ -63,6 +70,7 @@ def generate_and_train_dynamic_system(
                 cycle_length=12,
                 width=width,
                 height=height,
+                max_variables=MAX_VARIABLES,
             )
 
             # Train the system
@@ -77,7 +85,9 @@ def generate_and_train_dynamic_system(
             # If we got here, training succeeded
             print(f"Successfully trained {class_name}!")
 
-            is_good, critique = critique_system(anthropic_client, trainer, target1, target2)
+            is_good, critique = critique_system(
+                anthropic_client, trainer, target1, target2
+            )
             if not is_good:
                 print(f"Not a good system: {critique}")
 
@@ -95,7 +105,11 @@ Remember to think before returning code, and wrap all code in <code></code> so t
                 if len(messages) > 30:
                     print("Resetting!!")
                     messages = initial_messages()
-                system_code = generate_code(anthropic_client, system_prompt, messages, temperature=0.3)
+                system_code = generate_code(
+                    code_client,
+                    system_prompt,
+                    messages,
+                )
 
                 continue
 
@@ -125,7 +139,13 @@ Remember to think before returning code, and wrap all code in <code></code> so t
                 if len(messages) > 30:
                     print("Resetting!!")
                     messages = initial_messages()
-                system_code = generate_code(anthropic_client, system_prompt, messages)
+                system_code = generate_code(
+                    code_client,
+                    system_prompt,
+                    messages,
+                    temperature=0.3,
+                    thinking=False,
+                )
 
     raise Exception("Maximum attempts reached. Could not fix the system.")
 
@@ -152,9 +172,19 @@ def make_system_prompt():
 
     return f"""{SYSTEM_PROMPT_PRELUDE}
 
-There are many well-known iterated dynamic systems that can produce colorful 2D images, e.g. Bogdanov maps, Chirikov–Taylor maps, Duffing maps, Coupled Differentiable Maps, Continuous Differentiable Cellular Automata, Coupled Reaction-Diffusion Equations. etc. Take inspiration from those and others, but be creative and come up with your own system. Perhaps something where areas of color are delimited by soft sigmoid boundaries, and the overlap of colors is modulated in some interesting way. Or maybe there are interesting ideas from self-organizing you can borrow? Think freely and creatively (while following the rules I lay out).
+While well-known iterated systems like Bogdanov maps, Chirikov–Taylor maps, Duffing maps, Coupled Differentiable Maps, Continuous Differentiable Cellular Automata, and Coupled Reaction-Diffusion Equations offer valuable insights into generating complex 2D images from simple rules, I want you to push further and synthesize ideas from a wider range of dynamic phenomena. Draw inspiration from areas such as:
+* Biological Pattern Formation & Ecology: Think morphogenesis (Turing patterns), neural network dynamics (attractor states, oscillations), ecological cycles (predator-prey dynamics between 'A-ness' and 'B-ness'), or genetic regulatory network motifs.
+* Physics & Chemistry Analogies: Consider principles from phase transitions, wave interference, fluid dynamics (simplified vortices, flow fields), or chemical oscillators (like Belousov-Zhabotinsky reactions).
+* Modern AI & Computational Models: Look at concepts from differentiable physics, Neural ODEs, continuous Cellular Automata like Lenia, generative model internal dynamics, or even abstract ideas from swarm intelligence or self-organization.
+* Geometric & Topological Dynamics: Could the evolution involve changing shapes, boundaries, or connectivity in interesting ways?
 
-Your implementation should implement the DynamicSystem abstract class and will be optimized with the DynamicSystemTrainer (see code below).
+Be creative in how you implement the oscillation mechanism itself. Instead of an explicit counter, how can the system's internal state, spatial interactions, and relationship to the target images (A and B) intrinsically drive the switching behavior? Perhaps explore:
+* Systems with adaptive thresholds or boundaries (e.g., sigmoids whose parameters evolve).
+* Dynamics based on competitive exclusion or resource competition between elements favoring A vs. B.
+* Mechanisms involving hysteresis or memory embedded within the state variables.
+* Spatial wave propagation or signaling that triggers state shifts.
+* Think freely about combining these diverse inspirations, ensuring the core requirements (iterative, differentiable, image output, two-target oscillation) are met.
+* Your implementation should implement the DynamicSystem abstract class and will be optimized with the DynamicSystemTrainer (see code below).
 
 Your implementation must be differentiable, which can be non-trivial in a dynamic system. Your implementation should also produce an interesting image with multiple colors even at step 0.
 
@@ -167,7 +197,7 @@ Common errors to avoid include:
 * Immediate collapse to a single color.
 
 Important:
-* Make your system concise with <20 parameters (or total elements of parameter tensors).
+* Make your system concise with <{MAX_VARIABLES} parameters (or total elements of parameter tensors).
 * Don't include many comments.
 * Give the class a descriptive name and a one or two sentence description in a class comment.
 * Don't explicitly include cycle lengths in the code, since the cycle length should be implicit in the final trained model
@@ -215,11 +245,12 @@ def save_messages_history(messages: list[dict[str, Any]]) -> None:
 
 
 def generate_code(
-    client: anthropic.Client,
+    client: anthropic.Client | genai.Client,
     system_prompt: str,
     messages: list[dict],
     attempts_left=3,
-        temperature=0.8,
+    temperature=0.8,
+    thinking=True,
 ) -> str:
     if attempts_left == 0:
         raise Failed()
@@ -227,20 +258,36 @@ def generate_code(
     # Save messages to history file
     save_messages_history(messages)
 
-    full_response = claude_get_text(
-        client=client,
-        messages=messages,
-        max_tokens=4000,
-        temperature=temperature,
-        system_prompt=system_prompt,
-    )
+    if isinstance(client, anthropic.Client):
+        full_response = claude_get_text(
+            client=client,
+            messages=messages,
+            max_tokens=4000,
+            temperature=temperature,
+            system_prompt=system_prompt,
+            thinking=thinking,
+        )
+    else:
+        full_response = gemini_get_text(
+            client=client,
+            messages=messages,
+            system_prompt=system_prompt,
+            temperature=temperature,
+        )
 
     print(full_response)
 
     # Extract just the code part of the response
-    code_match = re.search(r"<code>(.*?)</code>", full_response, re.DOTALL)
+    code_match = re.search(
+        r"(?:<code>(.*?)</code>|```(?:\s*python\s*)?\n(.*?)\n```)",
+        full_response,
+        re.DOTALL,
+    )
     if code_match:
-        code = code_match.group(1).strip()
+        if code_match.group(1):
+            code = code_match.group(1).strip()
+        else:
+            code = code_match.group(2).strip()
         return code
     else:
         print("Failed to generate code with a <code></code> block, trying again")
@@ -402,22 +449,33 @@ def critique_system(
 
 
 def claude_get_text(
-    client,
+    client: anthropic.Client,
     system_prompt: str,
     messages: list[dict],
     temperature: float,
     max_tokens: int,
     attempts_left=3,
+    thinking=False,
+    thinking_tokens=2000,
 ) -> str:
     if attempts_left == 0:
         raise Failed("Rate limited by Anthropic too many times")
+
+    if thinking:
+        thinking_dict = {"type": "enabled", "budget_tokens": thinking_tokens}
+        temperature = 1
+    else:
+        thinking_dict = {"type": "disabled"}
+        thinking_tokens = 0
+
     try:
         response = client.messages.create(
             model="claude-3-7-sonnet-latest",
-            max_tokens=max_tokens,
+            max_tokens=max_tokens + thinking_tokens,
             temperature=temperature,
             system=system_prompt,
             messages=messages,
+            thinking=thinking_dict,
         )
     except RateLimitError:
         print("Rate limited by Anthropic, sleeping for 60 seconds")
@@ -430,13 +488,46 @@ def claude_get_text(
             max_tokens,
             attempts_left=attempts_left - 1,
         )
-    return response.content[0].text
+
+    if thinking:
+        for c in response.content:
+            if c.type != "text" and hasattr(c, "thinking"):
+                print(f"THINKING\n{c.thinking}")
+
+    return response.content[-1].text
+
+
+def gemini_get_text(
+    client: genai.Client,
+    system_prompt: str,
+    messages: list[dict],
+    temperature: float,
+):
+    messages = [message_to_gemini(m) for m in messages]
+
+    return client.models.generate_content(
+        model="gemini-2.5-pro-exp-03-25",
+        contents=messages,
+        config=GenerateContentConfig(
+            system_instruction=system_prompt, temperature=temperature
+        ),
+    ).text
+
+
+def message_to_gemini(msg):
+    role = msg["role"]
+    return {
+        "role": role if role == "user" else "model",
+        "parts": [{"text": msg["content"]}],
+    }
 
 
 def initial_messages():
     return [
         {
             "role": "user",
-            "content": "Generate a dynamic system that implements DynamicSystem",
+            "content": """Generate a dynamic system that implements DynamicSystem.
+
+Remember to think before returning code, and wrap all code in <code></code> so that I can parse it out programmatically and eval() it. Don't use backticks as I will eval() everything inside the <code></code> block.""",
         }
     ]
