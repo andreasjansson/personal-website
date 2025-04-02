@@ -1,3 +1,6 @@
+import json
+from datetime import datetime
+from typing import Any
 import time
 import base64
 import tempfile
@@ -11,11 +14,18 @@ from anthropic import RateLimitError
 from google import genai
 from google.genai.types import GenerateContentConfig
 
-
-from dynsys import *
+from train_dynamic_system import *
 from sample_data import create_target_images
 
 MAX_VARIABLES = 100
+
+SYSTEM_PROMPT_PRELUDE = """You're an agent with the task of creating interesting dynamic systems that produce images.
+
+I want to create an iterated dynamic system that when iterating, oscillates between two different images. The images are inputs to the system, and I want to optimize the variables of the dynamic system with gradient descent, so every operation of the dynamic system needs to be differentiable. The oscillation should happen because of the interaction between variables at each step.
+
+The beauty of dynamic systems is that they have very few variables, but when iterated through a step function, they produce very complex and interesting behaviours, or in our 2D case, images."""
+
+CODE_BLOCK_REMINDER = "Remember to think before returning code, and wrap all code in <code></code> so that I can parse it out programmatically and eval() it. Don't use backticks as I will eval() everything inside the <code></code> block."
 
 
 class Failed(Exception):
@@ -28,153 +38,138 @@ def generate_and_train_dynamic_system(
     num_attempts: int = 100,
     width: int = 128,
     height: int = 128,
-    max_iterations: int = 1000,
-) -> DynamicSystem:
+    training_steps: int = 2000,
+) -> str:
     print("starting...")
 
-    system_prompt = make_system_prompt()
+    messages = []
 
-    messages = initial_messages()
-    system_code = generate_code(code_client, system_prompt, messages)
+    target1, target2 = create_target_images(width, height)
+    target1_path = save_image_tensor(target1)
+    target2_path = save_image_tensor(target2)
 
-    # Try to train the system for several attempts
     for attempt in range(num_attempts):
+        if not messages or len(messages) > 30:
+            print("Resetting to initial messages")
+            messages = [
+                {
+                    "role": "user",
+                    "content": f"""Generate a dynamic system that implements DynamicSystem.
+
+{CODE_BLOCK_REMINDER}""",
+                }
+            ]
+
         try:
-            print(
-                f"Attempt {attempt + 1}/{num_attempts} - Compiling and training system"
+            print(f"Starting attempt {attempt + 1}/{num_attempts}")
+            is_good, code = run_attempt(
+                anthropic_client,
+                code_client,
+                width,
+                height,
+                training_steps,
+                messages,
+                target1_path,
+                target2_path,
             )
-
-            # Create a namespace for executing the code
-            namespace = globals().copy()
-
-            # Execute the system code
-            exec(system_code, namespace)
-
-            # Get the class name by finding class definitions in the code
-            class_name = extract_class_name(system_code)
-            if not class_name:
-                raise ValueError("Could not find DynamicSystem class in generated code")
-
-            # Create the system instance
-            system_class = namespace[class_name]
-            system = system_class().to("cuda")
-
-            # Create target images
-            target1, target2 = create_target_images(width, height)
-            target1 = target1.to("cuda")
-            target2 = target2.to("cuda")
-
-            # Initialize trainer
-            trainer = DynamicSystemTrainer(
-                model=system,
-                cycle_length=12,
-                width=width,
-                height=height,
-                max_variables=MAX_VARIABLES,
-            )
-
-            # Train the system
-            print(f"Training {class_name}...")
-            trainer.train_morphing(
-                target1,
-                target2,
-                num_iterations=max_iterations,
-                visualize_every=max_iterations // 4,
-            )
-
-            # If we got here, training succeeded
-            print(f"Successfully trained {class_name}!")
-
-            is_good, critique = critique_system(
-                anthropic_client, trainer, target1, target2
-            )
-            if not is_good:
-                print(f"Not a good system: {critique}")
-
-                fix_prompt = f"""
-After looking at the outputs, I realized it's not a good system because:
-
-{critique}
-
-Remember to think before returning code, and wrap all code in <code></code> so that I can parse it out programmatically and eval() it. Don't use backticks as I will eval() everything inside the <code></code> block."""
-
-                messages += [
-                    {"role": "assistant", "content": system_code},
-                    {"role": "user", "content": fix_prompt},
-                ]
-                if len(messages) > 30:
-                    print("Resetting!!")
-                    messages = initial_messages()
-                system_code = generate_code(
-                    code_client,
-                    system_prompt,
-                    messages,
-                )
-
-                continue
-
-            return system
-
-        except Failed:
-            raise
-
+            if is_good:
+                return code
         except Exception:
             error_traceback = traceback.format_exc()
-            print(f"Error during attempt {attempt + 1}:")
+            print("Caught unexpected error")
             print(error_traceback)
-
-            if attempt < num_attempts - 1:
-                # Ask Claude to fix the code
-                fix_prompt = f"""
-                I tried to use your DynamicSystem implementation but encountered an error:
-
-                {error_traceback}
-
-Remember to think before returning code, and wrap all code in <code></code> so that I can parse it out programmatically and eval() it. Don't use backticks as I will eval() everything inside the <code></code> block."""
-
-                messages += [
-                    {"role": "assistant", "content": system_code},
-                    {"role": "user", "content": fix_prompt},
-                ]
-                if len(messages) > 30:
-                    print("Resetting!!")
-                    messages = initial_messages()
-                system_code = generate_code(
-                    code_client,
-                    system_prompt,
-                    messages,
-                    temperature=0.3,
-                    thinking=False,
-                )
+            messages = []
 
     raise Exception("Maximum attempts reached. Could not fix the system.")
 
 
-def extract_class_name(code: str) -> str | None:
-    """Extract the name of the DynamicSystem class from code"""
-    match = re.search(r"class\s+(\w+)\s*\(\s*DynamicSystem\s*\)\s*:", code)
-    if match:
-        return match.group(1)
-    return None
+def run_attempt(
+    anthropic_client,
+    code_client,
+    width,
+    height,
+    training_steps,
+    messages,
+    target1_path,
+    target2_path,
+) -> tuple[bool, str]:
+    system_prompt = make_system_prompt()
 
+    code = generate_code(code_client, system_prompt, messages)
+    messages.append({"role": "assistant", "content": code})
 
-SYSTEM_PROMPT_PRELUDE = """You're an agent with the task of creating interesting dynamic systems that produce images.
+    try:
+        for output in train_dynamic_system(
+            code=code,
+            target1=target1_path,
+            target2=target2_path,
+            width=width,
+            height=height,
+            training_steps=training_steps,
+            max_variables=MAX_VARIABLES,
+            cycle_length=12,
+            loss_cycles=4,
+            total_cycles=6,
+            learning_rate=0.005,
+            seed=None,
+        ):
+            print(
+                f"Cycle losses - Target 1: {output.cycle_losses_target1}, Target 2: {output.cycle_losses_target2}"
+            )
+            if output.visualization:
+                img = Image.open(output.visualization)
+                plt.figure(figsize=(7, 7))
+                plt.imshow(np.array(img))
+                plt.axis("off")
+                plt.show()
+            final_output = output
 
-I want to create an iterated dynamic system that when iterating, oscillates between two different images. The images are inputs to the system, and I want to optimize the variables of the dynamic system with gradient descent, so every operation of the dynamic system needs to be differentiable. The oscillation should happen because of the interaction between variables at each step (not through an explicit counter).
+    except Exception:
+        error_traceback = traceback.format_exc()
+        print(error_traceback)
 
-The beauty of dynamic systems is that they have very few variables, but when iterated through a step function, they produce very complex and interesting behaviours, or in our 2D case, images."""
+        fix_prompt = f"""
+I tried to use your DynamicSystem implementation but encountered an error:
+
+{error_traceback}
+
+{CODE_BLOCK_REMINDER}"""
+
+        messages.append({"role": "user", "content": fix_prompt})
+        return False, code
+
+    print(f"System successfully trained")
+
+    is_good, critique = critique_system(
+        anthropic_client, final_output, target1_path, target2_path
+    )
+    if is_good:
+        return True, code
+
+    print(f"Not a good system: {critique}")
+
+    fix_prompt = f"""
+After looking at the outputs, I realized it's not a good system because:
+
+{critique}
+
+{CODE_BLOCK_REMINDER}"""
+
+    messages.append({"role": "user", "content": fix_prompt})
+
+    return False, code
 
 
 def make_system_prompt():
     current_dir = Path(__file__).parent
-    dynsys_path = current_dir / "dynsys.py"
-    dynsys_py_contents = dynsys_path.read_text()
+    train_dynamic_system_path = current_dir / "train_dynamic_system.py"
+    train_dynamic_system_py_contents = train_dynamic_system_path.read_text()
 
     return f"""{SYSTEM_PROMPT_PRELUDE}
 
 While well-known iterated systems like Bogdanov maps, Chirikov–Taylor maps, Duffing maps, Coupled Differentiable Maps, Continuous Differentiable Cellular Automata, and Coupled Reaction-Diffusion Equations offer valuable insights into generating complex 2D images from simple rules, I want you to push further and synthesize ideas from a wider range of dynamic phenomena. Draw inspiration from areas such as:
+* Physics, Chemistry & Complex Systems: Consider principles from phase transitions, wave interference, fluid dynamics, chemical oscillators... Also, explore how elements from chaotic dynamics (like sensitivity to conditions, non-linear feedback loops, bifurcation structures, or strange attractors) could be adapted. The goal isn't necessarily a purely chaotic output, but perhaps these mechanisms can create highly complex, interesting transition dynamics between the target states A and B, or be modulated by the system's state relative to A/B to enforce the oscillation.
 * Biological Pattern Formation & Ecology: Think morphogenesis (Turing patterns), neural network dynamics (attractor states, oscillations), ecological cycles (predator-prey dynamics between 'A-ness' and 'B-ness'), or genetic regulatory network motifs.
-* Physics & Chemistry Analogies: Consider principles from phase transitions, wave interference, fluid dynamics (simplified vortices, flow fields), or chemical oscillators (like Belousov-Zhabotinsky reactions).
 * Modern AI & Computational Models: Look at concepts from differentiable physics, Neural ODEs, continuous Cellular Automata like Lenia, generative model internal dynamics, or even abstract ideas from swarm intelligence or self-organization.
 * Geometric & Topological Dynamics: Could the evolution involve changing shapes, boundaries, or connectivity in interesting ways?
 
@@ -185,6 +180,7 @@ Be creative in how you implement the oscillation mechanism itself. Instead of an
 * Spatial wave propagation or signaling that triggers state shifts.
 * Think freely about combining these diverse inspirations, ensuring the core requirements (iterative, differentiable, image output, two-target oscillation) are met.
 * Your implementation should implement the DynamicSystem abstract class and will be optimized with the DynamicSystemTrainer (see code below).
+* I want a system that produces vivid, crisp, colorful images.
 
 Your implementation must be differentiable, which can be non-trivial in a dynamic system. Your implementation should also produce an interesting image with multiple colors even at step 0.
 
@@ -194,15 +190,20 @@ Common errors to avoid include:
 * RuntimeError: a view of a leaf Variable that requires grad is being used in an in-place operation.
 * NotImplementedError: Only 2D, 3D, 4D, 5D padding with non-constant padding are supported for now
 * RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!
+* AssertionError: The model has NNN variables (including number of elements in tensors), maximum is {MAX_VARIABLES}
+* TypeError: cannot assign 'torch.cuda.FloatTensor' as parameter 'XXX' (torch.nn.Parameter or None expected)
 * Immediate collapse to a single color.
 
 Important:
 * Make your system concise with <{MAX_VARIABLES} parameters (or total elements of parameter tensors).
 * Don't include many comments.
 * Give the class a descriptive name and a one or two sentence description in a class comment.
+* Cleanly separate parameters from state variables that are updated in step(). State variables should not be trainable parameters, and trainable parameters should not update.
+* reset_state() should initialize all state variables, and should be called at the end of __init__
 * Don't explicitly include cycle lengths in the code, since the cycle length should be implicit in the final trained model
-* Never use an explicit (step) counter in your code -- the step() function should implement some interaction between the variables (not just a step_count += 1 or similar!).
+* Avoid using an explicit (step) counter in your code -- the step() function should ideally implement some interaction between the variables
 * Don't use hard decisions (e.g. modulo operators) since everything needs to be differentiable.
+* Don't modify .data directly as this breaks the differentiation graph.
 * The __init__() method of the DynamicSystem class should take no arguments
 
 And extra important:
@@ -210,34 +211,25 @@ And extra important:
 
 Below follows my existing code, in which I will use the dynamic system class you output.
 
-{dynsys_py_contents}
+{train_dynamic_system_py_contents}
 """
-
-
-import json
-from datetime import datetime
-from typing import Any
 
 
 def save_messages_history(messages: list[dict[str, Any]]) -> None:
     """Save the messages history to a JSON file with timestamp."""
     history_file = Path("autodynsys-messages-history.json")
 
-    # Create a new entry with timestamp
     entry = {"timestamp": datetime.now().isoformat(), "messages": messages}
 
-    # Load existing history if it exists
     if history_file.exists():
         try:
             with open(history_file, "r") as f:
                 history = json.load(f)
         except json.JSONDecodeError:
-            # Handle corrupted file
             history = []
     else:
         history = []
 
-    # Add new entry and save
     history.append(entry)
 
     with open(history_file, "w") as f:
@@ -255,7 +247,6 @@ def generate_code(
     if attempts_left == 0:
         raise Failed()
 
-    # Save messages to history file
     save_messages_history(messages)
 
     if isinstance(client, anthropic.Client):
@@ -275,9 +266,9 @@ def generate_code(
             temperature=temperature,
         )
 
+    assert full_response
     print(full_response)
 
-    # Extract just the code part of the response
     code_match = re.search(
         r"(?:<code>(.*?)</code>|```(?:\s*python\s*)?\n(.*?)\n```)",
         full_response,
@@ -288,43 +279,49 @@ def generate_code(
             code = code_match.group(1).strip()
         else:
             code = code_match.group(2).strip()
+
+        if not code:
+            return generate_code(
+                client, system_prompt, messages, attempts_left=attempts_left - 1
+            )
+
         return code
     else:
+        # response is just code
+        last_line = full_response.strip().splitlines()
+        if full_response.startswith("class") and "return " in last_line:
+            return full_response
+
         print("Failed to generate code with a <code></code> block, trying again")
-        generate_code(client, system_prompt, messages, attempts_left=attempts_left - 1)
+        return generate_code(
+            client, system_prompt, messages, attempts_left=attempts_left - 1
+        )
 
 
-def critique_alternation(trainer, frames, target1, target2):
-    # Calculate distances to targets
-    dist_to_target1 = trainer.frame_distances_to_target(frames, target1)
-    dist_to_target2 = trainer.frame_distances_to_target(frames, target2)
-
-    # Check alternating pattern at cycle endpoints
-    cycle_length = trainer.cycle_length
-    alternation_correct = True
+def critique_alternation(
+    output: Output,
+) -> tuple[bool, str]:
+    alternation_is_good = True
     cycle_critique = []
 
-    for i in range(6):
-        cycle_end_idx = (i + 1) * cycle_length - 1
-        expected_closer_to_target1 = i % 2 == 0
+    losses_target1 = output.cycle_losses_target1
+    losses_target2 = output.cycle_losses_target2
 
-        dist1 = dist_to_target1[cycle_end_idx]
-        dist2 = dist_to_target2[cycle_end_idx]
-
-        if expected_closer_to_target1 and dist1 >= dist2:
-            alternation_correct = False
+    for i in range(len(losses_target1)):
+        if i % 2 == 0 and losses_target1[i] > losses_target2[i]:
+            alternation_is_good = False
             cycle_critique.append(
                 f"Cycle {i + 1} should be closer to target1 but was closer to target2 "
-                f"(dist1={dist1:.4f}, dist2={dist2:.4f})"
+                f"(loss_target1={losses_target1[i]:.4f}, loss_target2={losses_target2[i]:.4f})"
             )
-        elif not expected_closer_to_target1 and dist2 >= dist1:
-            alternation_correct = False
+        elif i % 2 == 1 and losses_target2[i] > losses_target1[i]:
+            alternation_is_good = False
             cycle_critique.append(
                 f"Cycle {i + 1} should be closer to target2 but was closer to target1 "
-                f"(dist1={dist1:.4f}, dist2={dist2:.4f})"
+                f"(loss_target1={losses_target1[i]:.4f}, loss_target2={losses_target2[i]:.4f})"
             )
 
-    if not alternation_correct:
+    if not alternation_is_good:
         critique_text = f"""After training, it failed to produce alternating patterns.
 
 {"\n".join(cycle_critique)}"""
@@ -333,44 +330,30 @@ def critique_alternation(trainer, frames, target1, target2):
     return True, ""
 
 
-def critique_with_ai(client, trainer, frames, target1, target2) -> tuple[bool, str]:
-    # Create a temporary directory
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
+def critique_with_ai(
+    client: anthropic.Anthropic,
+    output: Output,
+    target1_path: Path,
+    target2_path: Path,
+) -> tuple[bool, str]:
+    cycle_paths = []
+    for i, img_path in enumerate(output.cycle_images):
+        cycle_path = Path("/tmp") / f"cycle_{i + 1}.png"
+        img = Image.open(img_path)
+        img.save(cycle_path)
+        cycle_paths.append(cycle_path)
 
-        # Save target images
-        target1_path = temp_path / "target1.png"
-        target2_path = temp_path / "target2.png"
+    assert len(cycle_paths) == 6
 
-        # Convert target tensors to PIL images and save
-        Image.fromarray((target1.cpu().numpy() * 255).astype(np.uint8)).save(
-            target1_path
-        )
-        Image.fromarray((target2.cpu().numpy() * 255).astype(np.uint8)).save(
-            target2_path
-        )
+    all_files = [target1_path, target2_path] + cycle_paths
 
-        # Save cycle end images
-        cycle_paths = []
-        for i in range(6):
-            cycle_end_idx = (i + 1) * trainer.cycle_length - 1
-            cycle_path = temp_path / f"cycle_{i + 1}.png"
-            # Convert numpy array to PIL image and save
-            Image.fromarray((frames[cycle_end_idx] * 255).astype(np.uint8)).save(
-                cycle_path
-            )
-            cycle_paths.append(cycle_path)
-
-        # Prepare files list for Claude
-        all_files = [target1_path, target2_path] + cycle_paths
-
-        system_prompt = f"""{SYSTEM_PROMPT_PRELUDE}
+    system_prompt = f"""{SYSTEM_PROMPT_PRELUDE}
 
 I have a dynamic system that I've trained to oscillate between two target images. I want you to critique how good the system is.
 
-I want a system that produces vivid, colorful images that are similar to the target images."""
+I want a system that produces vivid, crisp, colorful images that are similar to the target images."""
 
-        prompt = f"""
+    prompt = f"""
 The first two images are:
 - target1.png: The first target pattern
 - target2.png: The second target pattern
@@ -393,36 +376,34 @@ Be critical and thorough in your assessment.
 Start with YES/NO, followed by reasoning, since I will use your initial word (YES or NO) in a programmatic context.
         """
 
-        # Get AI's critique
-        content = []
-        for file_path in all_files:
-            with open(file_path, "rb") as f:
-                encoded_string = base64.b64encode(f.read()).decode()
+    content = []
+    for file_path in all_files:
+        with open(file_path, "rb") as f:
+            encoded_string = base64.b64encode(f.read()).decode()
 
-            mime_type = "image/png"
+        mime_type = "image/png"
 
-            content.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": mime_type,
-                        "data": encoded_string,
-                    },
-                }
-            )
-
-        content.append({"type": "text", "text": prompt})
-
-        critique = claude_get_text(
-            client,
-            system_prompt=system_prompt,
-            messages=[{"role": "user", "content": content}],
-            temperature=0,
-            max_tokens=1000,
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": mime_type,
+                    "data": encoded_string,
+                },
+            }
         )
 
-    # Determine if the system is good based on both criteria
+    content.append({"type": "text", "text": prompt})
+
+    critique = claude_get_text(
+        client,
+        system_prompt=system_prompt,
+        messages=[{"role": "user", "content": content}],
+        temperature=0,
+        max_tokens=1000,
+    )
+
     is_good = critique.lower().startswith("yes")
 
     return is_good, critique
@@ -430,17 +411,13 @@ Start with YES/NO, followed by reasoning, since I will use your initial word (YE
 
 def critique_system(
     client: anthropic.Anthropic,
-    trainer: DynamicSystemTrainer,
-    target1: torch.Tensor,
-    target2: torch.Tensor,
+    output: Output,
+    target1_path: Path,
+    target2_path: Path,
 ) -> tuple[bool, str]:
-    frames = trainer.images_over_time(num_cycles=6)
-
-    alternation_is_good, alternation_critique = critique_alternation(
-        trainer, frames, target1, target2
-    )
+    alternation_is_good, alternation_critique = critique_alternation(output)
     ai_is_good, ai_critique = critique_with_ai(
-        client, trainer, frames, target1, target2
+        client, output, target1_path, target2_path
     )
 
     is_good = alternation_is_good and ai_is_good
@@ -486,6 +463,8 @@ def claude_get_text(
             messages,
             temperature,
             max_tokens,
+            thinking=thinking,
+            thinking_tokens=thinking_tokens,
             attempts_left=attempts_left - 1,
         )
 
@@ -508,9 +487,7 @@ def gemini_get_text(
     return client.models.generate_content(
         model="gemini-2.5-pro-exp-03-25",
         contents=messages,
-        config=GenerateContentConfig(
-            system_instruction=system_prompt, temperature=temperature
-        ),
+        config=GenerateContentConfig(system_instruction=system_prompt, temperature=1.0),
     ).text
 
 
@@ -522,12 +499,13 @@ def message_to_gemini(msg):
     }
 
 
-def initial_messages():
-    return [
-        {
-            "role": "user",
-            "content": """Generate a dynamic system that implements DynamicSystem.
+def save_image_tensor(tensor: torch.Tensor) -> Path:
+    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    filename = Path(temp_file.name)
+    temp_file.close()
 
-Remember to think before returning code, and wrap all code in <code></code> so that I can parse it out programmatically and eval() it. Don't use backticks as I will eval() everything inside the <code></code> block.""",
-        }
-    ]
+    img_array = (tensor.cpu().numpy() * 255).astype(np.uint8)
+    img = Image.fromarray(img_array)
+    img.save(filename)
+
+    return filename
