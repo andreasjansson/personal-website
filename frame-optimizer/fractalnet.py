@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 import torch
 from torch import nn
@@ -248,49 +249,6 @@ def create_target_image(depth: int, num_colors: int, mode: str = 'stripes') -> n
     return target
 
 
-def visualize_tree_structure(model: FractalNet, depth: int, save_path: str = None):
-    """Visualize the tree structure of the fractal model"""
-    with torch.no_grad():
-        leaf_nodes = model.process_tree(depth)
-        is_horizontal = (depth - 1) % 2 == 0
-
-        x_idxs, y_idxs = zip(*leaf_nodes.keys())
-        width = max(x_idxs) + 1
-        height = max(y_idxs) + 1
-
-        # Create a visualization showing which nodes are active at each position
-        fig, ax = plt.subplots(1, 1, figsize=(7, 7))
-
-        # For each leaf node position
-        for (x, y), node_activations in leaf_nodes.items():
-            # Get the index of the most active node
-            node_idx = torch.argmax(node_activations).item()
-
-            # Calculate color based on node index
-            color = plt.cm.viridis(node_idx / model.nodes_per_direction)
-
-            # Create a rectangle at the cell position
-            rect = plt.Rectangle((x, y), 1, 1, color=color, alpha=0.7)
-            ax.add_patch(rect)
-
-            # Add text showing the node index
-            ax.text(x + 0.5, y + 0.5, str(node_idx),
-                    horizontalalignment='center', verticalalignment='center')
-
-        ax.set_xlim(0, width)
-        ax.set_ylim(0, height)
-        ax.set_aspect('equal')
-        ax.invert_yaxis()  # To match image coordinates
-
-        plt.title(f"Node activation pattern (depth {depth})")
-        plt.tight_layout()
-
-        if save_path:
-            plt.savefig(save_path)
-
-        plt.show()
-
-
 def render_html_fractal(model: FractalNet, output_dir: str="fractal-output", delay_seconds: int=2):
     """
     Render the trained fractal model as a single HTML file with JavaScript animation.
@@ -302,10 +260,6 @@ def render_html_fractal(model: FractalNet, output_dir: str="fractal-output", del
         output_dir: Directory to save the HTML file
         delay_seconds: Seconds between splits
     """
-    import os
-    import json
-    from pathlib import Path
-
     # Create output directory if it doesn't exist
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
