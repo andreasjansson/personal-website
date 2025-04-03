@@ -1,5 +1,4 @@
 import os
-import json
 from pathlib import Path
 import torch
 from torch import nn
@@ -7,6 +6,10 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import numpy as np
+from PIL import Image
+import requests
+from io import BytesIO
+from sklearn.cluster import KMeans
 
 
 class NodeNet(nn.Module):
@@ -123,9 +126,130 @@ class FractalNet(nn.Module):
         return image_logits
 
 
-def train_fractal_net(target_image: np.ndarray, num_colors: int = 3, depth: int = 5, num_nodes: int = 20,
-                     lr: float = 0.001, epochs: int = 1000, device: str = "cuda", viz_every: int = 50):
-    target_image = target_image.astype(np.float32)
+def load_image(image_src: str, num_colors: int, depth: int) -> tuple[np.ndarray, list[tuple]]:
+    h_splits = (depth + 1) // 2
+    v_splits = depth // 2
+    width = 2 ** h_splits
+    height = 2 ** v_splits
+
+    # Download image if it's a URL
+    if image_src.startswith('http'):
+        response = requests.get(image_src)
+        img = Image.open(BytesIO(response.content))
+    else:
+        img = Image.open(image_src)
+
+    # Resize image to match target dimensions
+    img = img.resize((width, height), Image.LANCZOS)
+
+    # Convert to numpy array and normalize
+    img_array = np.array(img)
+
+    # Handle both RGB and grayscale
+    if len(img_array.shape) == 2:  # Grayscale
+        img_array = np.stack([img_array, img_array, img_array], axis=-1)
+    elif img_array.shape[2] == 4:  # RGBA
+        img_array = img_array[:, :, :3]  # Drop alpha channel
+
+    # Reshape to 2D array of pixels
+    pixels = img_array.reshape(-1, 3)
+
+    # Use KMeans to find the specified number of colors
+    kmeans = KMeans(n_clusters=num_colors, random_state=42)
+    kmeans.fit(pixels)
+
+    # Get the color palette (in RGB)
+    color_map = [tuple(map(int, color)) for color in kmeans.cluster_centers_]
+
+    # Assign each pixel to the nearest cluster center
+    labels = kmeans.predict(pixels).reshape(height, width)
+
+    # Create one-hot encoded array
+    quantized = np.zeros((height, width, num_colors), dtype=np.float32)
+    for i in range(num_colors):
+        quantized[:, :, i] = (labels == i).astype(np.float32)
+
+    return quantized, color_map
+
+
+def create_target_image(depth: int, num_colors: int, mode: str = 'stripes') -> tuple[np.ndarray, list[tuple]]:
+    """
+    Create a target image for training, along with its color map.
+
+    Args:
+        depth: Depth of the fractal
+        num_colors: Number of colors to use
+        mode: 'stripes', 'checkerboard', or 'circular'
+
+    Returns:
+        Tuple of (target image as one-hot encoded array, color map as RGB tuples)
+    """
+    h_splits = (depth + 1) // 2
+    v_splits = depth // 2
+
+    width = 2 ** h_splits
+    height = 2 ** v_splits
+
+    # Create one-hot encoded target
+    target = np.zeros((height, width, num_colors), dtype=np.float32)
+
+    # Create a color map using a colorful palette
+    if mode == 'stripes':
+        color_map = [plt.cm.rainbow(i / num_colors)[:3] for i in range(num_colors)]
+        for i in range(num_colors):
+            mask_x = ((i * width // num_colors <= np.arange(width)) &
+                    (np.arange(width) < (i + 1) * width // num_colors))
+            for y in range(height):
+                if y % 2 == 0:
+                    target[y, mask_x, i] = 1.0
+                else:
+                    target[y, mask_x, (i+1) % num_colors] = 1.0
+
+    elif mode == 'checkerboard':
+        color_map = [plt.cm.viridis(i / num_colors)[:3] for i in range(num_colors)]
+        for y in range(height):
+            for x in range(width):
+                color_idx = (x + y) % num_colors
+                target[y, x, color_idx] = 1.0
+
+    elif mode == 'circular':
+        color_map = [plt.cm.plasma(i / num_colors)[:3] for i in range(num_colors)]
+        center_y, center_x = height // 2, width // 2
+        max_radius = min(height, width) // 2
+
+        for y in range(height):
+            for x in range(width):
+                dist = np.sqrt((y - center_y)**2 + (x - center_x)**2)
+                color_idx = int((dist / max_radius) * num_colors) % num_colors
+                target[y, x, color_idx] = 1.0
+
+    # Convert color map to 8-bit RGB
+    color_map = [(int(r*255), int(g*255), int(b*255)) for r, g, b in color_map]
+
+    return target, color_map
+
+
+def train_fractal_net(target: np.ndarray, color_map: list[tuple], num_colors: int = 8, depth: int = 5,
+                       num_nodes: int = 20, lr: float = 0.001, epochs: int = 1000,
+                       device: str = "cuda", viz_every: int = 50):
+    """
+    Train a fractal network to approximate a target image.
+
+    Args:
+        target: Target image as one-hot encoded numpy array
+        color_map: List of RGB tuples representing the colors
+        num_colors: Number of colors in the target
+        depth: Depth of the fractal
+        num_nodes: Number of nodes in the model
+        lr: Learning rate
+        epochs: Number of training epochs
+        device: Computation device
+        viz_every: Visualize progress every N epochs
+
+    Returns:
+        Trained model and loss history
+    """
+    target = target.astype(np.float32)
 
     model = FractalNet(num_nodes=num_nodes, num_colors=num_colors, device=device)
     model.to(device)
@@ -136,12 +260,12 @@ def train_fractal_net(target_image: np.ndarray, num_colors: int = 3, depth: int 
     width = 2 ** h_splits
     height = 2 ** v_splits
 
-    if target_image.shape != (height, width, num_colors):
+    if target.shape != (height, width, num_colors):
         raise ValueError(f"Target image should have shape {(height, width, num_colors)}, "
-                         f"got {target_image.shape}")
+                         f"got {target.shape}")
 
-    target = torch.tensor(target_image, device=device, dtype=torch.float32)
-    target_indices = torch.argmax(target, dim=2)
+    target_tensor = torch.tensor(target, device=device, dtype=torch.float32)
+    target_indices = torch.argmax(target_tensor, dim=2)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=50, factor=0.5, verbose=True)
@@ -170,25 +294,45 @@ def train_fractal_net(target_image: np.ndarray, num_colors: int = 3, depth: int 
         loss_history.append(loss.item())
 
         if epoch % viz_every == 0 or epoch == epochs - 1:
-            visualize_progress(target, logits, loss_history, epoch)
+            visualize_progress(target_tensor, logits, loss_history, epoch, color_map)
 
     return model, loss_history
 
 
-def visualize_progress(target: torch.Tensor, logits: torch.Tensor, loss_history: list, epoch: int):
+def visualize_progress(target: torch.Tensor, logits: torch.Tensor, loss_history: list,
+                       epoch: int, color_map: list[tuple]):
     with torch.no_grad():
         current_output = logits.detach().cpu().numpy()
         target_np = target.cpu().numpy()
 
-    plt.figure(figsize=(7, 3))
+    plt.figure(figsize=(7, 2.5))
+
+    # Create label maps using color map for better visualization
+    target_indices = np.argmax(target_np, axis=2)
+    pred_indices = np.argmax(current_output, axis=2)
+
+    height, width = target_indices.shape
+    target_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+    output_rgb = np.zeros((height, width, 3), dtype=np.uint8)
+
+    for y in range(height):
+        for x in range(width):
+            target_idx = target_indices[y, x]
+            pred_idx = pred_indices[y, x]
+
+            if target_idx < len(color_map):
+                target_rgb[y, x] = color_map[target_idx]
+
+            if pred_idx < len(color_map):
+                output_rgb[y, x] = color_map[pred_idx]
 
     plt.subplot(1, 3, 1)
-    plt.imshow(np.argmax(target_np, axis=2))
+    plt.imshow(target_rgb)
     plt.title("Target Image")
     plt.axis('off')
 
     plt.subplot(1, 3, 2)
-    plt.imshow(np.argmax(current_output, axis=2))
+    plt.imshow(output_rgb)
     plt.title(f"Model Output (Epoch {epoch})")
     plt.axis('off')
 
@@ -199,57 +343,16 @@ def visualize_progress(target: torch.Tensor, logits: torch.Tensor, loss_history:
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
 
-    # Calculate and show accuracy
-    pred_indices = np.argmax(current_output, axis=2)
-    target_indices = np.argmax(target_np, axis=2)
     accuracy = np.mean(pred_indices == target_indices)
-
-    print(f"{accuracy=}")  # TODO(andreas): remove debug
-
+    plt.figtext(0.5, 0.01, f"Accuracy: {accuracy:.4f}", ha="center", fontsize=10)
 
     plt.tight_layout()
     plt.show()
 
 
-def create_target_image(depth: int, num_colors: int, mode: str = 'stripes') -> np.ndarray:
-    h_splits = (depth + 1) // 2
-    v_splits = depth // 2
-
-    width = 2 ** h_splits
-    height = 2 ** v_splits
-
-    target = np.zeros((height, width, num_colors), dtype=np.float32)
-
-    if mode == 'stripes':
-        for i in range(num_colors):
-            mask_x = ((i * width // num_colors <= np.arange(width)) &
-                    (np.arange(width) < (i + 1) * width // num_colors))
-            for y in range(height):
-                if y % 2 == 0:
-                    target[y, mask_x, i] = 1.0
-                else:
-                    target[y, mask_x, (i+1) % num_colors] = 1.0
-
-    elif mode == 'checkerboard':
-        for y in range(height):
-            for x in range(width):
-                color_idx = (x + y) % num_colors
-                target[y, x, color_idx] = 1.0
-
-    elif mode == 'circular':
-        center_y, center_x = height // 2, width // 2
-        max_radius = min(height, width) // 2
-
-        for y in range(height):
-            for x in range(width):
-                dist = np.sqrt((y - center_y)**2 + (x - center_x)**2)
-                color_idx = int((dist / max_radius) * num_colors) % num_colors
-                target[y, x, color_idx] = 1.0
-
-    return target
 
 
-def render_html_fractal(model: FractalNet, output_dir: str="fractal-output", delay_seconds: int=2):
+def render_html_fractal(model: FractalNet, color_map: list[tuple], output_dir: str="fractal-output", delay_seconds: int=2):
     """
     Render the trained fractal model as a single HTML file with JavaScript animation.
     Creates a table-based simulation of fractal splitting that matches the model's forward pass.
@@ -257,9 +360,14 @@ def render_html_fractal(model: FractalNet, output_dir: str="fractal-output", del
 
     Args:
         model: The trained FractalNet model
+        color_map: List of RGB tuples representing the color palette
         output_dir: Directory to save the HTML file
         delay_seconds: Seconds between splits
     """
+    import os
+    import json
+    from pathlib import Path
+
     # Create output directory if it doesn't exist
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
@@ -281,9 +389,14 @@ def render_html_fractal(model: FractalNet, output_dir: str="fractal-output", del
 
                 # Get color
                 color_idx = torch.argmax(node_colors[node_idx]).item()
-                color = plt.cm.rainbow(color_idx / model.num_colors)
-                hex_color = '#{:02x}{:02x}{:02x}'.format(
-                    int(color[0]*255), int(color[1]*255), int(color[2]*255))
+
+                # Use the provided color map
+                if color_idx < len(color_map):
+                    r, g, b = color_map[color_idx]
+                    hex_color = f'#{r:02x}{g:02x}{b:02x}'
+                else:
+                    # Fallback if color index is out of range
+                    hex_color = '#808080'
 
             # Store node data
             node_data[direction].append({
@@ -490,3 +603,39 @@ def render_html_fractal(model: FractalNet, output_dir: str="fractal-output", del
         f.write(html)
 
     print(f"Generated single HTML fractal animation in {output_dir}/index.html")
+
+
+def visualize_fractal_image(model: FractalNet, depth: int, color_map: list[tuple], figsize: tuple = (7, 7)):
+    """
+    Visualize the output of the fractal model.
+
+    Args:
+        model: The trained fractal model
+        depth: Depth to render at
+        color_map: List of RGB tuples representing colors
+        figsize: Size of the figure
+    """
+    with torch.no_grad():
+        # Get the model output
+        logits = model(depth)
+        pred_indices = torch.argmax(logits, dim=2).cpu().numpy()
+
+        # Create RGB image using the color map
+        height, width = pred_indices.shape
+        output_img = np.zeros((height, width, 3), dtype=np.uint8)
+
+        for y in range(height):
+            for x in range(width):
+                color_idx = pred_indices[y, x]
+                if color_idx < len(color_map):
+                    output_img[y, x] = color_map[color_idx]
+
+    # Display the image
+    plt.figure(figsize=figsize)
+    plt.imshow(output_img)
+    plt.title(f"Fractal Approximation (Depth {depth})")
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+    return output_img
