@@ -1,0 +1,10 @@
+build:
+  gpu: true
+  python_version: "3.12"
+  python_packages:
+    - "numpy==2.2.3"
+    - "torch==2.5.1"
+    - "pillow==11.1.0"
+    - "matplotlib"
+
+predict: "train_dynamic_system.py:train_dynamic_system"
