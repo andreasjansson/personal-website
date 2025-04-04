@@ -15,7 +15,7 @@ from google import genai
 from google.genai.types import GenerateContentConfig
 
 from train_dynamic_system import *
-from sample_data import create_target_images
+from sample_data import create_target_images, flux_target_images
 
 MAX_VARIABLES = 100
 
@@ -44,7 +44,8 @@ def generate_and_train_dynamic_system(
 
     messages = []
 
-    target1, target2 = create_target_images(width, height)
+    #target1, target2 = create_target_images(width, height)
+    target1, target2 = flux_target_images(width, height)
     target1_path = save_image_tensor(target1)
     target2_path = save_image_tensor(target2)
 
@@ -162,7 +163,7 @@ After looking at the outputs, I realized it's not a good system because:
 
 def make_system_prompt():
     current_dir = Path(__file__).parent
-    train_dynamic_system_path = current_dir / "train_dynamic_system.py"
+    train_dynamic_system_path = current_dir / "train-dynamic-system/train_dynamic_system.py"
     train_dynamic_system_py_contents = train_dynamic_system_path.read_text()
 
     return f"""{SYSTEM_PROMPT_PRELUDE}
@@ -199,7 +200,7 @@ Important:
 * Don't include many comments.
 * Give the class a descriptive name and a one or two sentence description in a class comment.
 * Cleanly separate parameters from state variables that are updated in step(). State variables should not be trainable parameters, and trainable parameters should not update.
-* reset_state() should initialize all state variables, and should be called at the end of __init__
+* reset_state() should initialize all state variables (give them descriptive names, not just a single self.state), and should be called at the end of __init__
 * Don't explicitly include cycle lengths in the code, since the cycle length should be implicit in the final trained model
 * Avoid using an explicit (step) counter in your code -- the step() function should ideally implement some interaction between the variables
 * Don't use hard decisions (e.g. modulo operators) since everything needs to be differentiable.
