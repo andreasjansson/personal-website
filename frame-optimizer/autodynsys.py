@@ -6,7 +6,11 @@ import base64
 import tempfile
 from pathlib import Path
 import re
+from replicate.exceptions import ModelError
+import requests
+import replicate
 import numpy as np
+import torch
 from PIL import Image
 import traceback
 import anthropic
@@ -14,7 +18,6 @@ from anthropic import RateLimitError
 from google import genai
 from google.genai.types import GenerateContentConfig
 
-from train_dynamic_system import *
 from sample_data import create_target_images, flux_target_images
 
 MAX_VARIABLES = 100
@@ -45,9 +48,10 @@ def generate_and_train_dynamic_system(
     messages = []
 
     #target1, target2 = create_target_images(width, height)
-    target1, target2 = flux_target_images(width, height)
-    target1_path = save_image_tensor(target1)
-    target2_path = save_image_tensor(target2)
+    target1_url = "https://replicate.delivery/xezq/Oc2TFqk1rLq2ExmRjdm9CH6HOHX3py6Cb8lAGm0BdK7Gi2HF/out-0.webp"
+    target2_url = "https://replicate.delivery/xezq/KwYEiaAoyqb1GFttsEC8GvCmMZWMHfAEepWgUN40xAnlJafoA/out-1.webp"
+    target1_path = download_file(target1_url)
+    target2_path = download_file(target2_url)
 
     for attempt in range(num_attempts):
         if not messages or len(messages) > 30:
@@ -70,6 +74,8 @@ def generate_and_train_dynamic_system(
                 height,
                 training_steps,
                 messages,
+                target1_url,
+                target2_url,
                 target1_path,
                 target2_path,
             )
@@ -91,6 +97,8 @@ def run_attempt(
     height,
     training_steps,
     messages,
+    target1_url,
+    target2_url,
     target1_path,
     target2_path,
 ) -> tuple[bool, str]:
@@ -99,40 +107,43 @@ def run_attempt(
     code = generate_code(code_client, system_prompt, messages)
     messages.append({"role": "assistant", "content": code})
 
+    final_output = None
     try:
-        for output in train_dynamic_system(
-            code=code,
-            target1=target1_path,
-            target2=target2_path,
-            width=width,
-            height=height,
-            training_steps=training_steps,
-            max_variables=MAX_VARIABLES,
-            cycle_length=12,
-            loss_cycles=4,
-            total_cycles=6,
-            learning_rate=0.005,
-            seed=None,
+        for item in replicate.run(
+            "andreasjansson/train-dynamic-system:564f4fc5cb32e7529a51583e29404c3e8b9779475c5957f4c33b083657c8f062",
+            input={
+                "code": code,
+                "width": width,
+                "height": height,
+                "target1": str(target1_url),
+                "target2": str(target2_url),
+                "timeout": 600,
+                "loss_cycles": 4,
+                "yield_every": 250,
+                "cycle_length": 12,
+                "total_cycles": 6,
+                "learning_rate": 0.005,
+                "max_variables": MAX_VARIABLES,
+                "training_steps": training_steps,
+                "return_animation": True
+            }
         ):
-            print(
-                f"Cycle losses - Target 1: {output.cycle_losses_target1}, Target 2: {output.cycle_losses_target2}"
-            )
-            if output.visualization:
-                img = Image.open(output.visualization)
-                plt.figure(figsize=(7, 7))
-                plt.imshow(np.array(img))
-                plt.axis("off")
-                plt.show()
-            final_output = output
+            final_output = item  # The last item will be the final output
 
-    except Exception:
-        error_traceback = traceback.format_exc()
-        print(error_traceback)
+            img = Image.open(download_file(item["visualization"]))
+            plt.figure(figsize=(7, 7))
+            plt.imshow(np.array(img))
+            plt.axis("off")
+            plt.show()
+
+    except ModelError as e:
+        logs = e.prediction.logs
+        print(logs)
 
         fix_prompt = f"""
 I tried to use your DynamicSystem implementation but encountered an error:
 
-{error_traceback}
+{logs}
 
 {CODE_BLOCK_REMINDER}"""
 
@@ -141,6 +152,7 @@ I tried to use your DynamicSystem implementation but encountered an error:
 
     print(f"System successfully trained")
 
+    assert final_output
     is_good, critique = critique_system(
         anthropic_client, final_output, target1_path, target2_path
     )
@@ -300,13 +312,13 @@ def generate_code(
 
 
 def critique_alternation(
-    output: Output,
+    output: dict,
 ) -> tuple[bool, str]:
     alternation_is_good = True
     cycle_critique = []
 
-    losses_target1 = output.cycle_losses_target1
-    losses_target2 = output.cycle_losses_target2
+    losses_target1 = output["cycle_losses_target1"]
+    losses_target2 = output["cycle_losses_target2"]
 
     for i in range(len(losses_target1)):
         if i % 2 == 0 and losses_target1[i] > losses_target2[i]:
@@ -333,15 +345,13 @@ def critique_alternation(
 
 def critique_with_ai(
     client: anthropic.Anthropic,
-    output: Output,
+    output: dict,
     target1_path: Path,
     target2_path: Path,
 ) -> tuple[bool, str]:
     cycle_paths = []
-    for i, img_path in enumerate(output.cycle_images):
-        cycle_path = Path("/tmp") / f"cycle_{i + 1}.png"
-        img = Image.open(img_path)
-        img.save(cycle_path)
+    for img_url in output["cycle_images"]:
+        cycle_path = download_file(img_url)
         cycle_paths.append(cycle_path)
 
     assert len(cycle_paths) == 6
@@ -412,7 +422,7 @@ Start with YES/NO, followed by reasoning, since I will use your initial word (YE
 
 def critique_system(
     client: anthropic.Anthropic,
-    output: Output,
+    output: dict,
     target1_path: Path,
     target2_path: Path,
 ) -> tuple[bool, str]:
@@ -424,6 +434,22 @@ def critique_system(
     is_good = alternation_is_good and ai_is_good
     critique = "\n\n".join([alternation_critique, ai_critique])
     return is_good, critique
+
+
+def download_file(url: str) -> Path:
+    """Download a file from a URL and return its path"""
+
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(url).suffix)
+    temp_file.close()
+
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+
+    with open(temp_file.name, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+    return Path(temp_file.name)
 
 
 def claude_get_text(
