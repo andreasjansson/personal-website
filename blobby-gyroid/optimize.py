@@ -295,9 +295,14 @@ def train_on_video(
     lr=5e-3,
     fov=50.0,
     eikonal_w=0.01,
-    device="cuda",
+    device="mps",
 ):
-    device = torch.device(device if torch.cuda.is_available() else "cpu")
+    if device == "mps" and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif device == "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     video, fps = load_video(mp4_path)
     T, H, W, _ = video.shape
     print(f"Loaded video: {T} frames, {W}x{H}, fps={fps:.2f}")
