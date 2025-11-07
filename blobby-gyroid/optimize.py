@@ -152,7 +152,8 @@ class BlobbyGyroid(nn.Module):
         Gq = self.gyroid(q)
         Mq = self.metaballs(q, t)
         Hq = self.harmonics(q, t)
-        Fp = Gq + self.kappa * torch.log1p(Mq) + Hq - self.bias_b
+        # Reduce gyroid contribution significantly - focus on metaballs
+        Fp = 0.1 * Gq + self.kappa * torch.log1p(Mq) + Hq - self.bias_b
         return Fp, q
 
     def density_and_color(self, p, t, need_normals=True):
