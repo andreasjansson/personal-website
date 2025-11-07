@@ -184,12 +184,16 @@ class BlobbyGyroid(nn.Module):
         # Add position-dependent color variation
         q_color = torch.sin(q * 2.0)  # spatial frequency color modulation
         
+        # Make color brighter in high-density regions
+        density_boost = torch.clamp(sigma.squeeze() * 5.0, 0, 1).unsqueeze(-1)
+        
         rgb = torch.sigmoid(
             self.q0
             + self.q1 * ndotl.unsqueeze(-1)
             + (n @ self.Q2.T)
             + self.q3 * emissive.unsqueeze(-1)
             + q_color * 0.3  # add spatial color variation
+            + density_boost * 0.5  # brighten high-density areas
         )
         return sigma.unsqueeze(-1), rgb, Fval, n
 
