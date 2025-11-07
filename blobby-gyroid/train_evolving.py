@@ -12,6 +12,41 @@ import torch.nn.functional as F
 from evolving_field import EvolvingFieldSystem
 from optimize import load_video, make_pinhole_rays
 
+
+def render_video(model, H, W, times, device, out_path, preview_scale=0.1, n_samples=16):
+    """Render a quick preview video."""
+    model.eval()
+    
+    H_render = int(H * preview_scale)
+    W_render = int(W * preview_scale)
+    
+    rays_o, rays_d = make_pinhole_rays(H_render, W_render, fov_deg=50.0)
+    rays_o = rays_o.to(device)
+    rays_d = rays_d.to(device)
+    
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(out_path, fourcc, 10.0, (W_render, H_render))
+    
+    for ti, t_now in enumerate(times.tolist()):
+        rgb_img = torch.zeros(H_render * W_render, 3, device=device)
+        chunk = 4096
+        for s in range(0, H_render * W_render, chunk):
+            e = min(s + chunk, H_render * W_render)
+            with torch.set_grad_enabled(True):  # Need grad for model dynamics
+                rgb, _ = render(
+                    model, rays_o[s:e], rays_d[s:e], t_now,
+                    near=0.0, far=8.0, n_samples=n_samples, stratified=False
+                )
+            rgb_img[s:e] = rgb.clamp(0, 1).detach()
+        
+        rgb_img = rgb_img.reshape(H_render, W_render, 3).cpu().numpy()
+        bgr = cv2.cvtColor((rgb_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        writer.write(bgr)
+    
+    writer.release()
+    print(f"Wrote {out_path}")
+    model.train()
+
 def render(model, rays_o, rays_d, t_scalar, near=0.0, far=8.0, n_samples=64, stratified=True):
     """Volume rendering for evolving field system."""
     device = rays_o.device
