@@ -371,7 +371,7 @@ def train_on_video(
         
         # Sparsity loss: encourage most space to be empty
         # This prevents the model from learning uniform density everywhere
-        sparsity_loss = sigma.mean()
+        sparsity_loss = aux['sigma'].mean()
         loss = loss + 0.01 * sparsity_loss
 
         # Optional Eikonal: sample random points in volume
