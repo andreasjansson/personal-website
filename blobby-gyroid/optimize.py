@@ -198,10 +198,13 @@ class BlobbyGyroid(nn.Module):
 # Volume rendering (NeRF-style)
 # -------------------------------
 def render(
-    model, rays_o, rays_d, t_scalar, near=0.0, far=8.0, n_samples=96, stratified=True
+    model, rays_o, rays_d, t_scalar, near=0.0, far=8.0, n_samples=96, stratified=True,
+    visualize_density=False, visualize_F=False
 ):
     """
     rays_o/d: (N,3). Returns rgb (N,3), aux dict
+    visualize_density: if True, render density as grayscale instead of color
+    visualize_F: if True, render signed distance field F as color (red=positive, blue=negative)
     """
     device = rays_o.device
     N = rays_o.shape[0]
@@ -224,6 +227,19 @@ def render(
     sigma, rgb, Fval, n = model.density_and_color(pts, t_rep, need_normals=True)
     sigma = sigma.reshape(N, n_samples, 1)
     rgb = rgb.reshape(N, n_samples, 3)
+    Fval_reshaped = Fval.reshape(N, n_samples)
+    
+    # Override colors for visualization modes
+    if visualize_density:
+        # Visualize density as grayscale
+        density_viz = sigma.squeeze(-1).unsqueeze(-1).expand(-1, -1, 3)
+        rgb = torch.clamp(density_viz * 10.0, 0, 1)  # scale up for visibility
+    elif visualize_F:
+        # Visualize F field: red for positive (outside), blue for negative (inside)
+        F_normalized = torch.tanh(Fval_reshaped * 2.0)  # [-1, 1]
+        rgb = torch.zeros_like(rgb)
+        rgb[:, :, 0] = torch.clamp(F_normalized, 0, 1)   # red for positive
+        rgb[:, :, 2] = torch.clamp(-F_normalized, 0, 1)  # blue for negative
 
     # Volumetric integration
     dists = torch.cat(
