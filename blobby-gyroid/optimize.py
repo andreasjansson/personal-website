@@ -297,8 +297,6 @@ def train_on_video(
     ).reshape(-1, 2)
 
     for it in range(1, iters + 1):
-        if it % 10 == 0 or it == 1:
-            print("starting iteration", it)
         model.train()
         # Random frame/time
         fidx = np.random.randint(0, T)
