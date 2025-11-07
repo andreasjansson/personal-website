@@ -345,6 +345,9 @@ def train_on_video(
                 out_path=f"intermediate_{it:05d}.mp4",
                 n_samples=samples_per_ray,
                 device=device,
+                preview_scale=0.1,
+                max_frames=30,
+                preview_samples=16,
             )
 
     return model, (H, W), (rays_o_full, rays_d_full), times
