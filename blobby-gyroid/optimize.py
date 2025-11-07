@@ -156,10 +156,24 @@ class BlobbyGyroid(nn.Module):
         Fp = 0.1 * Gq + self.kappa * torch.log1p(Mq) + Hq - self.bias_b
         return Fp, q
 
+    def positional_encoding(self, x, L=10):
+        """Encode position with sinusoidal functions for high-frequency details."""
+        freq = 2.0 ** torch.linspace(0, L-1, L, device=x.device)
+        # x: (N, 3), freq: (L,)
+        # result: (N, 3*2*L) = (N, 6*L)
+        encoded = []
+        for f in freq:
+            encoded.append(torch.sin(2 * math.pi * f * x))
+            encoded.append(torch.cos(2 * math.pi * f * x))
+        return torch.cat(encoded, dim=-1)
+    
     def density_and_color(self, p, t, need_normals=True):
         # Make sure p requires grad for normals
         if need_normals and not p.requires_grad:
             p = p.clone().detach().requires_grad_(True)
+        
+        # Apply positional encoding to enable high-frequency learning
+        p_encoded = self.positional_encoding(p, L=6)  # Start with L=6 for reasonable freq
 
         Fval, q = self.field_F(p, t)
         delta = F.softplus(self.delta_raw) + 1e-3  # > 0
