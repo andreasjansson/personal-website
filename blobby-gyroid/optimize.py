@@ -279,7 +279,7 @@ def render(
     comp_rgb = comp_rgb + (1.0 - acc_alpha) * bg_color
     
     depth = torch.sum(weights * z_vals, dim=1)  # (N,)
-    return comp_rgb, {"weights": weights, "depth": depth, "acc_alpha": acc_alpha}
+    return comp_rgb, {"weights": weights, "depth": depth, "acc_alpha": acc_alpha, "sigma": sigma}
 
 
 # -------------------------------
