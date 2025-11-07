@@ -75,7 +75,7 @@ class BlobbyGyroid(nn.Module):
 
         # --- Harmonics
         self.K = K
-        self.h_s = nn.Parameter(torch.randn(K) * 0.1)
+        self.h_s = nn.Parameter(torch.randn(K) * 0.01)  # much smaller contribution
         self.h_k = nn.Parameter(torch.randn(K, 3))
         self.h_w = nn.Parameter(torch.randn(K) * 0.7)
         self.h_zeta = nn.Parameter(torch.randn(K))
