@@ -238,9 +238,9 @@ def render(
     weights = alpha * T  # (N,S)
     comp_rgb = torch.sum(weights[..., None] * rgb, dim=1)  # (N,3)
     
-    # Add white background
+    # Add dark blue background to match typical video style
     acc_alpha = torch.sum(weights, dim=1, keepdim=True)  # (N,1)
-    bg_color = torch.ones_like(comp_rgb)
+    bg_color = torch.tensor([0.15, 0.27, 0.33], device=comp_rgb.device).expand_as(comp_rgb)
     comp_rgb = comp_rgb + (1.0 - acc_alpha) * bg_color
     
     depth = torch.sum(weights * z_vals, dim=1)  # (N,)
