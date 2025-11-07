@@ -141,18 +141,22 @@ class FixedMetaballs(nn.Module):
         # Positional encoding of query points
         p_enc = self.positional_encoding(p, L=self.pos_enc_L)  # (N, pos_enc_dim)
         
+        # Time encoding
+        t_enc = self.time_encoding(t, L=self.time_enc_L)  # (time_enc_dim,)
+        t_enc_exp = t_enc[None, :].expand(p.shape[0], -1)  # (N, time_enc_dim)
+        
         # Broadcast ball info to all query points
         ball_pos_flat = ball_pos.reshape(-1)  # (n_balls*3,)
         ball_pos_exp = ball_pos_flat[None, :].expand(p.shape[0], -1)  # (N, n_balls*3)
         ball_sizes_exp = ball_sizes[None, :].expand(p.shape[0], -1)  # (N, n_balls)
         
-        # Density query
-        density_input = torch.cat([p_enc, ball_pos_exp, ball_sizes_exp], dim=-1)
+        # Density query with time
+        density_input = torch.cat([p_enc, t_enc_exp, ball_pos_exp, ball_sizes_exp], dim=-1)
         density_raw = self.density_net(density_input)
         density = F.softplus(density_raw)
         
-        # Color query
-        color_input = torch.cat([p_enc, ball_pos_exp, ball_sizes_exp, density], dim=-1)
+        # Color query with time
+        color_input = torch.cat([p_enc, t_enc_exp, ball_pos_exp, ball_sizes_exp, density], dim=-1)
         color = self.color_net(color_input)
         
         return density, color
