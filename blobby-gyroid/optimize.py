@@ -177,14 +177,19 @@ class BlobbyGyroid(nn.Module):
         else:
             n = torch.zeros_like(p)
 
-        # Simple differentiable shading
+        # Spatially-varying color with shading
         ndotl = n @ self.light_dir
         emissive = torch.sin(self.eta * (q @ self.w_vec) + self.zeta * t.squeeze(-1))
+        
+        # Add position-dependent color variation
+        q_color = torch.sin(q * 2.0)  # spatial frequency color modulation
+        
         rgb = torch.sigmoid(
             self.q0
             + self.q1 * ndotl.unsqueeze(-1)
             + (n @ self.Q2.T)
             + self.q3 * emissive.unsqueeze(-1)
+            + q_color * 0.3  # add spatial color variation
         )
         return sigma.unsqueeze(-1), rgb, Fval, n
 
