@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from evolving_field import EvolvingFieldSystem
+from metaballs_fixed import FixedMetaballs
 from optimize import load_video, make_pinhole_rays
 
 
