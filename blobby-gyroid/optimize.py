@@ -480,7 +480,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", type=str, required=True, help="path to .mp4")
     parser.add_argument("--iters", type=int, default=4000)
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="mps")
     parser.add_argument("--fov", type=float, default=50.0)
     args = parser.parse_args()
 
