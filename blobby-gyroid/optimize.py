@@ -270,10 +270,10 @@ def train_on_video(
     mp4_path,
     iters=4000,
     rays_per_step=2048,
-    samples_per_ray=96,
-    lr=2e-3,
+    samples_per_ray=64,
+    lr=5e-3,
     fov=50.0,
-    eikonal_w=0.05,
+    eikonal_w=0.01,
     device="cuda",
 ):
     device = torch.device(device if torch.cuda.is_available() else "cpu")
