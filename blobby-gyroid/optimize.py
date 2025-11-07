@@ -415,10 +415,15 @@ def train_on_video(
 # Rendering a reconstructed video
 # -------------------------------
 def render_full_video(
-    model, size_hw, rays_all, times, out_path="recon.mp4", n_samples=128, device="cuda",
+    model, size_hw, rays_all, times, out_path="recon.mp4", n_samples=128, device="mps",
     preview_scale=1.0, max_frames=None, preview_samples=None
 ):
-    device = torch.device(device if torch.cuda.is_available() else "cpu")
+    if device == "mps" and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif device == "cuda" and torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     model.eval()
     H, W = size_hw
     
