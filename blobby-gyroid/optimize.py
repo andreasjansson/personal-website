@@ -301,12 +301,14 @@ def train_on_video(
     eikonal_w=0.01,
     device="mps",
 ):
-    if device == "mps" and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif device == "cuda" and torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
+    if isinstance(device, str):
+        if device == "mps" and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif device == "cuda" and torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
+    print(f"Using device: {device}")
     video, fps = load_video(mp4_path)
     T, H, W, _ = video.shape
     print(f"Loaded video: {T} frames, {W}x{H}, fps={fps:.2f}")
