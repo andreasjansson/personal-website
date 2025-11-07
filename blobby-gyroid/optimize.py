@@ -126,12 +126,13 @@ class BlobbyGyroid(nn.Module):
     def metaballs(self, q, t):
         # q: (...,3), t: (...,1)
         q_ = q.unsqueeze(-2)  # (...,1,3)
-        c = self.mb_cbar + self.mb_u * torch.sin(
-            self.mb_nu[:, None] * t + self.mb_psi[:, None]
+        # Compute center positions: c = mb_cbar + mb_u * sin(mb_nu * t + mb_psi)
+        # mb_cbar: (N,3), mb_u: (N,3), mb_nu: (N,), mb_psi: (N,)
+        # t: (batch,1) - need to broadcast properly
+        # Result should be: (batch, N, 3)
+        c = self.mb_cbar[None, :, :] + self.mb_u[None, :, :] * torch.sin(
+            self.mb_nu[None, :, None] * t[:, None, :] + self.mb_psi[None, :, None]
         )
-        # c -> (..., N, 3) by broadcasting t
-        while c.dim() < q_.dim():
-            c = c.unsqueeze(0)
         beta = F.softplus(self.mb_beta_raw) + 0.3
         dist2 = ((q_ - c) ** 2).sum(-1)  # (...,N)
         M = torch.sum(self.mb_w * torch.exp(-beta * dist2), dim=-1)
