@@ -184,9 +184,18 @@ class BlobbyGyroid(nn.Module):
             p = p.clone().detach().requires_grad_(True)
         
         # Apply positional encoding to enable high-frequency learning
-        p_encoded = self.positional_encoding(p, L=6)  # Start with L=6 for reasonable freq
+        p_encoded = self.positional_encoding(p, L=10)  # L=10 for high frequencies
+        
+        # Concatenate with time and pass through MLP for high-freq details
+        t_expanded = t.expand(p.shape[0], 1) if t.shape[0] == 1 else t
+        mlp_input = torch.cat([p_encoded, t_expanded], dim=-1)
+        freq_adjustment = self.freq_mlp(mlp_input)
 
         Fval, q = self.field_F(p, t)
+        
+        # Add high-frequency details from MLP
+        Fval = Fval + freq_adjustment.squeeze(-1)
+        
         delta = F.softplus(self.delta_raw) + 1e-3  # > 0
         sigma = F.softplus(-(Fval) / delta)  # density
 
