@@ -343,11 +343,10 @@ def train_on_video(
 
         if it % 100 == 0:
             with torch.no_grad():
-                avg_sigma = sigma.mean().item()
                 avg_weights = aux['weights'].mean().item()
                 max_weights = aux['weights'].max().item()
                 acc_alpha_val = aux['acc_alpha'].mean().item()
-            print(f"[{it:05d}] loss={loss.item():.6f} | sigma={avg_sigma:.4f} | alpha={acc_alpha_val:.4f} | w_avg={avg_weights:.4f} w_max={max_weights:.4f}")
+            print(f"[{it:05d}] loss={loss.item():.6f} | alpha={acc_alpha_val:.4f} | w_avg={avg_weights:.4f} w_max={max_weights:.4f}")
             
             # Save a single frame preview at higher res for debugging
             if it % 500 == 0:
