@@ -45,7 +45,7 @@ print(f"kappa κ:     {model.kappa.item():.4f}")
 
 print(f"\nMetaball centers (mb_cbar):")
 print(f"  range: [{model.mb_cbar.min().item():.4f}, {model.mb_cbar.max().item():.4f}]")
-print(f"  mean position: {model.mb_cbar.mean(dim=0).cpu().numpy()}")
+print(f"  mean position: {model.mb_cbar.mean(dim=0).detach().cpu().numpy()}")
 
 print(f"\nInterpretation:")
 if F.mean() > 1.0:
