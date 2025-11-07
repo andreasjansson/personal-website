@@ -346,7 +346,32 @@ def train_on_video(
                 avg_sigma = sigma.mean().item()
                 avg_weights = aux['weights'].mean().item()
                 max_weights = aux['weights'].max().item()
-            print(f"[{it:05d}] loss={loss.item():.6f} | sigma={avg_sigma:.4f} | weights avg={avg_weights:.4f} max={max_weights:.4f}")
+                acc_alpha_val = aux['acc_alpha'].mean().item()
+            print(f"[{it:05d}] loss={loss.item():.6f} | sigma={avg_sigma:.4f} | alpha={acc_alpha_val:.4f} | w_avg={avg_weights:.4f} w_max={max_weights:.4f}")
+            
+            # Save a single frame preview at higher res for debugging
+            if it % 500 == 0:
+                with torch.set_grad_enabled(True):
+                    preview_H, preview_W = int(H * 0.25), int(W * 0.25)
+                    preview_rays_o, preview_rays_d = make_pinhole_rays(preview_H, preview_W, fov_deg=fov)
+                    preview_rays_o = preview_rays_o.to(device)
+                    preview_rays_d = preview_rays_d.to(device)
+                    
+                    preview_rgb = torch.zeros(preview_H * preview_W, 3, device=device)
+                    chunk = 8192
+                    for s in range(0, preview_H * preview_W, chunk):
+                        e = min(s + chunk, preview_H * preview_W)
+                        rgb_chunk, _ = render(
+                            model, preview_rays_o[s:e], preview_rays_d[s:e], 
+                            times[0].item(), near=0.0, far=8.0, n_samples=32, stratified=False
+                        )
+                        preview_rgb[s:e] = rgb_chunk.clamp(0, 1).detach()
+                    
+                    preview_img = preview_rgb.reshape(preview_H, preview_W, 3).cpu().numpy()
+                    preview_bgr = cv2.cvtColor((preview_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(f"frame_{it:05d}.png", preview_bgr)
+                    print(f"  -> Saved frame_{it:05d}.png")
+            
             render_full_video(
                 model,
                 (H, W),
