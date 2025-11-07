@@ -120,7 +120,10 @@ class EvolvingFieldSystem(nn.Module):
         intensities = state[:, 7:8]  # (n_blobs, 1)
         
         # Neural network component (learns complex dynamics)
-        dstate_neural = self.dynamics_net(flat_state).reshape(self.n_blobs, 8)
+        if self.dynamics_net is not None:
+            dstate_neural = self.dynamics_net(flat_state).reshape(self.n_blobs, 8)
+        else:
+            dstate_neural = torch.zeros_like(state)
         
         # Physical-inspired components (for interpretability + stability)
         # Positions evolve according to velocities
