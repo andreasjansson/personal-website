@@ -354,37 +354,55 @@ def train_on_video(
 # Rendering a reconstructed video
 # -------------------------------
 def render_full_video(
-    model, size_hw, rays_all, times, out_path="recon.mp4", n_samples=128, device="cuda"
+    model, size_hw, rays_all, times, out_path="recon.mp4", n_samples=128, device="cuda",
+    preview_scale=1.0, max_frames=None, preview_samples=None
 ):
     device = torch.device(device if torch.cuda.is_available() else "cpu")
     model.eval()
     H, W = size_hw
-    rays_o_full, rays_d_full = rays_all
+    
+    # Apply preview scale to resolution
+    if preview_scale < 1.0:
+        H_render = int(H * preview_scale)
+        W_render = int(W * preview_scale)
+        rays_o_preview, rays_d_preview = make_pinhole_rays(H_render, W_render, fov_deg=50.0)
+        rays_o_preview = rays_o_preview.to(device)
+        rays_d_preview = rays_d_preview.to(device)
+    else:
+        H_render, W_render = H, W
+        rays_o_preview, rays_d_preview = rays_all
+    
+    # Use preview samples if specified
+    render_samples = preview_samples if preview_samples is not None else n_samples
+    
+    # Limit frames if requested
+    times_to_render = times if max_frames is None else times[:max_frames]
+    
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(
-        out_path, fourcc, max(1.0, len(times) / len(times)), (W, H)
+        out_path, fourcc, max(1.0, len(times_to_render) / len(times_to_render)), (W_render, H_render)
     )
-    for ti, t_now in enumerate(times.tolist()):
-        rgb_img = torch.zeros(H * W, 3, device=device)
+    for ti, t_now in enumerate(times_to_render.tolist()):
+        rgb_img = torch.zeros(H_render * W_render, 3, device=device)
         chunk = 8192
-        for s in range(0, H * W, chunk):
-            e = min(s + chunk, H * W)
+        for s in range(0, H_render * W_render, chunk):
+            e = min(s + chunk, H_render * W_render)
             with torch.set_grad_enabled(True):
                 rgb, _ = render(
                     model,
-                    rays_o_full[s:e],
-                    rays_d_full[s:e],
+                    rays_o_preview[s:e],
+                    rays_d_preview[s:e],
                     t_now,
                     near=0.0,
                     far=8.0,
-                    n_samples=n_samples,
+                    n_samples=render_samples,
                     stratified=False,
                 )
             rgb_img[s:e] = rgb.clamp(0, 1).detach()
-        rgb_img = rgb_img.reshape(H, W, 3).cpu().numpy()
+        rgb_img = rgb_img.reshape(H_render, W_render, 3).cpu().numpy()
         bgr = cv2.cvtColor((rgb_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         writer.write(bgr)
-        print(f"rendered frame {ti + 1}/{len(times)}")
+        print(f"rendered frame {ti + 1}/{len(times_to_render)}")
     writer.release()
     print(f"Wrote {out_path}")
 
