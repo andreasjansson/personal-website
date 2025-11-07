@@ -32,7 +32,7 @@ with torch.set_grad_enabled(True):
             print(f"Sample stats:")
             print(f"  weights: avg={aux['weights'].mean().item():.4f}, max={aux['weights'].max().item():.4f}")
             print(f"  alpha: {aux['acc_alpha'].mean().item():.4f}")
-            print(f"  rgb sample: {rgb[0].cpu().numpy()}")
+            print(f"  rgb sample: {rgb[0].detach().cpu().numpy()}")
 
 rgb_img = rgb_img.reshape(H, W, 3).cpu().numpy()
 bgr = cv2.cvtColor((rgb_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
