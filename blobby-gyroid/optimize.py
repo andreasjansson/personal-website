@@ -49,6 +49,17 @@ class BlobbyGyroid(nn.Module):
     def __init__(self, J=4, N=16, K=8, seed=0):
         super().__init__()
         g = torch.Generator().manual_seed(seed)
+        
+        # MLP to process positional encoding for high-frequency details
+        # Input: positional encoding (3*2*10 = 60) + time (1)
+        # Output: density adjustment
+        self.freq_mlp = nn.Sequential(
+            nn.Linear(61, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
 
         # --- Warp W(p,t) = Σ a_j ⊙ sin(B_j p + ω_j t + φ_j)
         self.J = J
