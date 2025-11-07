@@ -458,6 +458,7 @@ def render_full_video(
     writer = cv2.VideoWriter(
         out_path, fourcc, max(1.0, len(times_to_render) / len(times_to_render)), (W_render, H_render)
     )
+    print("Rendering video...")
     for ti, t_now in enumerate(times_to_render.tolist()):
         rgb_img = torch.zeros(H_render * W_render, 3, device=device)
         chunk = 8192
@@ -478,7 +479,7 @@ def render_full_video(
         rgb_img = rgb_img.reshape(H_render, W_render, 3).cpu().numpy()
         bgr = cv2.cvtColor((rgb_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         writer.write(bgr)
-        print(f"rendered frame {ti + 1}/{len(times_to_render)}")
+        #print(f"rendered frame {ti + 1}/{len(times_to_render)}")
     writer.release()
     print(f"Wrote {out_path}")
 
@@ -492,18 +493,30 @@ if __name__ == "__main__":
     parser.add_argument("--iters", type=int, default=4000)
     parser.add_argument("--device", type=str, default="mps")
     parser.add_argument("--fov", type=float, default=50.0)
+    parser.add_argument("--render-final", action="store_true", help="Render final high-quality video (slow)")
+    parser.add_argument("--final-scale", type=float, default=0.5, help="Resolution scale for final render")
+    parser.add_argument("--final-samples", type=int, default=64, help="Samples per ray for final render")
     args = parser.parse_args()
 
     model, size_hw, rays_all, times = train_on_video(
         args.video, iters=args.iters, device=args.device, fov=args.fov
     )
 
-    # optional: render reconstruction at original frame times
-    render_full_video(
-        model,
-        size_hw,
-        rays_all,
-        times,
-        out_path="reconstruction.mp4",
-        device=args.device,
-    )
+    if args.render_final:
+        print(f"\n{'='*60}")
+        print(f"Rendering final video at {args.final_scale*100:.0f}% resolution with {args.final_samples} samples/ray...")
+        print(f"This may take a while. Use --final-scale and --final-samples to adjust quality/speed.")
+        print(f"{'='*60}\n")
+        render_full_video(
+            model,
+            size_hw,
+            rays_all,
+            times,
+            out_path="reconstruction.mp4",
+            device=args.device,
+            preview_scale=args.final_scale,
+            preview_samples=args.final_samples,
+        )
+    else:
+        print(f"\nTraining complete! Use --render-final to render a high-quality video.")
+        print(f"Intermediate videos were saved as intermediate_XXXXX.mp4")
