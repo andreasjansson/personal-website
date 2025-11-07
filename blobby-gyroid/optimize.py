@@ -81,8 +81,8 @@ class BlobbyGyroid(nn.Module):
         self.h_zeta = nn.Parameter(torch.randn(K))
 
         # --- Globals
-        self.kappa = nn.Parameter(torch.tensor(2.5))  # increase metaball influence significantly
-        self.bias_b = nn.Parameter(torch.tensor(-1.0))  # more negative bias for stronger blobs
+        self.kappa = nn.Parameter(torch.tensor(3.0))  # strong metaball influence
+        self.bias_b = nn.Parameter(torch.tensor(0.5))  # positive bias to offset metaball contribution
         self.delta_raw = nn.Parameter(torch.tensor(-2.5))  # δ = softplus -> around 0.08, much sharper
 
         # --- Color params (glass + emissive)
