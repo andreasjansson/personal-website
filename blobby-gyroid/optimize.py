@@ -422,12 +422,13 @@ def render_full_video(
     model, size_hw, rays_all, times, out_path="recon.mp4", n_samples=128, device="mps",
     preview_scale=1.0, max_frames=None, preview_samples=None
 ):
-    if device == "mps" and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif device == "cuda" and torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
+    if isinstance(device, str):
+        if device == "mps" and torch.backends.mps.is_available():
+            device = torch.device("mps")
+        elif device == "cuda" and torch.cuda.is_available():
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cpu")
     model.eval()
     H, W = size_hw
     
@@ -441,6 +442,9 @@ def render_full_video(
     else:
         H_render, W_render = H, W
         rays_o_preview, rays_d_preview = rays_all
+        # Ensure rays are on correct device
+        rays_o_preview = rays_o_preview.to(device)
+        rays_d_preview = rays_d_preview.to(device)
     
     # Use preview samples if specified
     render_samples = preview_samples if preview_samples is not None else n_samples
