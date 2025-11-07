@@ -102,13 +102,22 @@ def train(args):
     times = torch.arange(T, dtype=torch.float32) / float(fps)
     
     # Create model
-    model = EvolvingFieldSystem(
-        n_blobs=args.n_blobs,
-        hidden_dynamics=args.hidden_dynamics,
-        hidden_query=args.hidden_query,
-        hidden_summary=args.hidden_summary,
-        pos_enc_L=args.pos_enc_L,
-    ).to(device)
+    if args.model_type == 'evolving':
+        model = EvolvingFieldSystem(
+            n_blobs=args.n_blobs,
+            hidden_dynamics=args.hidden_dynamics,
+            hidden_query=args.hidden_query,
+            hidden_summary=args.hidden_summary,
+            pos_enc_L=args.pos_enc_L,
+        ).to(device)
+    elif args.model_type == 'metaballs':
+        model = FixedMetaballs(
+            n_balls=args.n_blobs,
+            pos_enc_L=args.pos_enc_L,
+            hidden=args.hidden_query if args.hidden_query > 0 else 64,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown model type: {args.model_type}")
     
     # Count parameters
     n_params = sum(p.numel() for p in model.parameters())
