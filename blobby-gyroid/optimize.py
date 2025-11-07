@@ -377,7 +377,13 @@ def train_on_video(
                 avg_weights = aux['weights'].mean().item()
                 max_weights = aux['weights'].max().item()
                 acc_alpha_val = aux['acc_alpha'].mean().item()
-            print(f"[{it:05d}] loss={loss.item():.6f} | alpha={acc_alpha_val:.4f} | w_avg={avg_weights:.4f} w_max={max_weights:.4f}")
+                
+                # Measure actual visual quality on predicted pixels
+                pred_std = pred_rgb.std().item()
+                target_std = target.std().item()
+                contrast_ratio = pred_std / (target_std + 1e-8)
+                
+            print(f"[{it:05d}] loss={loss.item():.6f} | pred_std={pred_std:.4f} tgt_std={target_std:.4f} ratio={contrast_ratio:.2%}")
             
             # Save a single frame preview at higher res for debugging
             if it % 500 == 0:
