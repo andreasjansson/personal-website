@@ -141,6 +141,10 @@ def train(args):
                 target_std = target.std().item()
                 contrast_ratio = pred_std / (target_std + 1e-8)
             print(f"[{it:05d}] loss={loss.item():.6f} | contrast={contrast_ratio:.1%} | temp_diff={pred_temporal_diff.item():.5f}")
+            
+            # Render intermediate video
+            print("Rendering video...")
+            render_video(model, H, W, times[:30], device, f"intermediate_{it:05d}.mp4")
         
         # Save checkpoint
         if it % 500 == 0:
