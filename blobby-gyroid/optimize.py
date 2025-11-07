@@ -342,7 +342,6 @@ def train_on_video(
 # -------------------------------
 # Rendering a reconstructed video
 # -------------------------------
-@torch.no_grad()
 def render_full_video(
     model, size_hw, rays_all, times, out_path="recon.mp4", n_samples=128, device="cuda"
 ):
@@ -355,22 +354,22 @@ def render_full_video(
         out_path, fourcc, max(1.0, len(times) / len(times)), (W, H)
     )
     for ti, t_now in enumerate(times.tolist()):
-        # chunk to avoid OOM
         rgb_img = torch.zeros(H * W, 3, device=device)
         chunk = 8192
         for s in range(0, H * W, chunk):
             e = min(s + chunk, H * W)
-            rgb, _ = render(
-                model,
-                rays_o_full[s:e],
-                rays_d_full[s:e],
-                t_now,
-                near=0.0,
-                far=8.0,
-                n_samples=n_samples,
-                stratified=False,
-            )
-            rgb_img[s:e] = rgb.clamp(0, 1)
+            with torch.set_grad_enabled(True):
+                rgb, _ = render(
+                    model,
+                    rays_o_full[s:e],
+                    rays_d_full[s:e],
+                    t_now,
+                    near=0.0,
+                    far=8.0,
+                    n_samples=n_samples,
+                    stratified=False,
+                )
+            rgb_img[s:e] = rgb.clamp(0, 1).detach()
         rgb_img = rgb_img.reshape(H, W, 3).cpu().numpy()
         bgr = cv2.cvtColor((rgb_img * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         writer.write(bgr)
