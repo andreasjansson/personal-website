@@ -42,15 +42,10 @@ class EvolvingFieldSystem(nn.Module):
         # Each blob: [x, y, z, vx, vy, vz, size, intensity]
         self.initial_state = nn.Parameter(torch.randn(n_blobs, 8, generator=g) * 0.3)
         
-        # Evolution dynamics network: dX/dt = f_network(X)
-        # This learns the "physics" of how blobs interact
-        hidden = 256
+        # Evolution dynamics network: MUCH SMALLER
+        hidden = 64
         self.dynamics_net = nn.Sequential(
             nn.Linear(n_blobs * 8, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, hidden),
             nn.Tanh(),
             nn.Linear(hidden, n_blobs * 8),
         )
@@ -62,30 +57,24 @@ class EvolvingFieldSystem(nn.Module):
         # Nonlinear interaction matrix between blobs
         self.interaction_matrix = nn.Parameter(torch.randn(n_blobs, n_blobs, generator=g) * 0.1)
         
-        # Field query network: takes positional encoding + blob states → density
-        # Input: pos_enc(p) + blob_state_summary
+        # Field query network: MUCH SMALLER - use less positional encoding
+        # Input: pos_enc(p) with L=4 (24 dims) + blob_state_summary (32 dims)
         self.field_query_net = nn.Sequential(
-            nn.Linear(60 + 128, 256),  # 60 from pos_enc(L=10), 128 from blob summary
+            nn.Linear(24 + 32, 64),
             nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1),
+            nn.Linear(64, 1),
         )
         
         # Blob state summarizer (for field query)
         self.blob_summarizer = nn.Sequential(
-            nn.Linear(n_blobs * 8, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
+            nn.Linear(n_blobs * 8, 32),
         )
         
-        # Color network
+        # Color network: MUCH SMALLER
         self.color_net = nn.Sequential(
-            nn.Linear(60 + 128 + 1, 128),  # pos_enc + blob_summary + density
+            nn.Linear(24 + 32 + 1, 64),
             nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, 3),
+            nn.Linear(64, 3),
             nn.Sigmoid(),
         )
         
