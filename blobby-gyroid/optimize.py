@@ -291,6 +291,8 @@ def train_on_video(
     ).reshape(-1, 2)
 
     for it in range(1, iters + 1):
+        if it % 10 == 0 or it == 1:
+            print("starting iteration", it)
         model.train()
         # Random frame/time
         fidx = np.random.randint(0, T)
@@ -335,6 +337,15 @@ def train_on_video(
 
         if it % 100 == 0:
             print(f"[{it:05d}] loss={loss.item():.6f}")
+            render_full_video(
+                model,
+                (H, W),
+                (rays_o_full, rays_d_full),
+                times,
+                out_path=f"intermediate_{it:05d}.mp4",
+                n_samples=samples_per_ray,
+                device=device,
+            )
 
     return model, (H, W), (rays_o_full, rays_d_full), times
 
