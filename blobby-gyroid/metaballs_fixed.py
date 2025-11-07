@@ -80,6 +80,17 @@ class FixedMetaballs(nn.Module):
             encoded.append(torch.cos(2 * math.pi * f * x))
         return torch.cat(encoded, dim=-1)
     
+    def time_encoding(self, t, L=4):
+        """Time encoding for temporal variation."""
+        if not torch.is_tensor(t):
+            t = torch.tensor(t, dtype=torch.float32)
+        freq = 2.0 ** torch.linspace(0, L-1, L, device=t.device if torch.is_tensor(t) else torch.device('cpu'))
+        encoded = []
+        for f in freq:
+            encoded.append(torch.sin(2 * math.pi * f * t))
+            encoded.append(torch.cos(2 * math.pi * f * t))
+        return torch.cat(encoded, dim=-1)
+    
     def get_ball_positions(self, t):
         """
         Get metaball positions at time t.
