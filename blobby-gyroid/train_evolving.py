@@ -174,7 +174,14 @@ def train(args):
         pred_temporal_diff = (pred_rgb_other - pred_rgb).abs().mean()
         target_temporal_diff = (target_other - target).abs().mean()
         temporal_loss = (pred_temporal_diff - target_temporal_diff).abs()
-        loss = loss + 0.5 * temporal_loss
+        
+        # MUCH stronger temporal loss - force the model to produce temporal variation
+        loss = loss + 2.0 * temporal_loss
+        
+        # Additional: penalize if temporal variation is too small (static solution)
+        if pred_temporal_diff < 0.001:
+            static_penalty = (0.001 - pred_temporal_diff) * 10.0
+            loss = loss + static_penalty
         
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
