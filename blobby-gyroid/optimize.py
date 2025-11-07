@@ -427,13 +427,17 @@ def train_on_video(
                 contrast_ratio = pred_std / (target_std + 1e-8)
                 
                 # Measure temporal variation by rendering at t=0 and t=max
+                # Use a simpler approach: check metaball positions at different times
                 t_start = times[0].item()
                 t_end = times[-1].item()
-                rgb_start, _ = render(model, rays_o[:512], rays_d[:512], t_start, 
-                                     near=0.0, far=8.0, n_samples=32, stratified=False)
-                rgb_end, _ = render(model, rays_o[:512], rays_d[:512], t_end,
-                                   near=0.0, far=8.0, n_samples=32, stratified=False)
-                temporal_var = (rgb_end - rgb_start).abs().mean().item()
+                test_pts = torch.zeros(100, 3, device=device)
+                t_tensor_start = torch.full((100, 1), t_start, device=device)
+                t_tensor_end = torch.full((100, 1), t_end, device=device)
+                
+                # Check metaball influence at different times
+                M_start = model.metaballs(test_pts, t_tensor_start)
+                M_end = model.metaballs(test_pts, t_tensor_end)
+                temporal_var = (M_end - M_start).abs().mean().item()
                 
             print(f"[{it:05d}] loss={loss.item():.6f} | contrast={contrast_ratio:.1%} | temp_var={temporal_var:.5f}")
             
