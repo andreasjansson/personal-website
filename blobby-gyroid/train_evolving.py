@@ -66,7 +66,13 @@ def train(args):
     times = torch.arange(T, dtype=torch.float32) / float(fps)
     
     # Create model
-    model = EvolvingFieldSystem(n_blobs=args.n_blobs).to(device)
+    model = EvolvingFieldSystem(
+        n_blobs=args.n_blobs,
+        hidden_dynamics=args.hidden_dynamics,
+        hidden_query=args.hidden_query,
+        hidden_summary=args.hidden_summary,
+        pos_enc_L=args.pos_enc_L,
+    ).to(device)
     
     # Count parameters
     n_params = sum(p.numel() for p in model.parameters())
