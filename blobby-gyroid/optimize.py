@@ -62,7 +62,7 @@ class BlobbyGyroid(nn.Module):
         # --- Gyroid core
         self.omega = nn.Parameter(torch.tensor([1.6, 1.7, 1.8]))  # per-axis freq
         self.phi = nn.Parameter(torch.zeros(3))
-        self.alpha = nn.Parameter(torch.tensor(2.0))  # increase to reduce gyroid influence (G-alpha)
+        self.alpha = nn.Parameter(torch.tensor(3.0))  # large alpha to make G≈0 on average
 
         # --- Metaballs
         self.N = N
