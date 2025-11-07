@@ -66,10 +66,10 @@ class BlobbyGyroid(nn.Module):
 
         # --- Metaballs
         self.N = N
-        self.mb_w = nn.Parameter(torch.ones(N) * 1.0)  # stronger individual weights
+        self.mb_w = nn.Parameter(torch.ones(N) * 1.5)  # stronger individual weights
         self.mb_beta_raw = nn.Parameter(torch.randn(N) * 0.3)  # vary sharpness
-        self.mb_cbar = nn.Parameter(torch.randn(N, 3, generator=g) * 2.0)  # spread in [-2,2]^3
-        self.mb_u = nn.Parameter(torch.randn(N, 3, generator=g) * 0.5)  # larger motion amplitude
+        self.mb_cbar = nn.Parameter(torch.randn(N, 3, generator=g) * 0.8)  # tight in [-0.8,0.8]^3 near origin
+        self.mb_u = nn.Parameter(torch.randn(N, 3, generator=g) * 0.3)  # moderate motion
         self.mb_nu = nn.Parameter(torch.abs(torch.randn(N, generator=g)) * 1.0 + 0.5)  # faster movement
         self.mb_psi = nn.Parameter(torch.randn(N, generator=g) * 3.14159)  # random phase
 
