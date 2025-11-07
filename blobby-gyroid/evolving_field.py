@@ -158,7 +158,7 @@ class EvolvingFieldSystem(nn.Module):
         returns: (N, 1) density, (N, 3) color
         """
         # Positional encoding of query points
-        p_enc = self.positional_encoding(p, L=10)  # (N, 60)
+        p_enc = self.positional_encoding(p, L=4)  # (N, 24) - reduced for speed
         
         # Summarize blob state
         blob_summary = self.blob_summarizer(blob_state.reshape(-1))  # (128,)
