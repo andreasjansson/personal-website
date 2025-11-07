@@ -48,10 +48,15 @@ class FixedMetaballs(nn.Module):
         self.ball_intensity_freq = nn.Parameter(torch.abs(torch.randn(n_balls)) * 1.5 + 0.4)
         self.ball_intensity_phase = nn.Parameter(torch.randn(n_balls) * math.pi)
         
-        # Field query network: pos_enc(p) + ball_positions + ball_sizes -> density
-        # This adds high-frequency spatial detail
+        # Add time encoding for temporal variation
+        self.time_enc_L = 4
+        time_enc_dim = 2 * self.time_enc_L
+        
+        # Field query network: pos_enc(p) + time_enc(t) + ball info -> density
+        # This allows the field to learn complex spatial-temporal patterns
+        # beyond just moving metaballs
         self.density_net = nn.Sequential(
-            nn.Linear(pos_enc_dim + n_balls * 3 + n_balls, hidden),
+            nn.Linear(pos_enc_dim + time_enc_dim + n_balls * 3 + n_balls, hidden),
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
@@ -60,7 +65,7 @@ class FixedMetaballs(nn.Module):
         
         # Color network
         self.color_net = nn.Sequential(
-            nn.Linear(pos_enc_dim + n_balls * 3 + n_balls + 1, hidden),
+            nn.Linear(pos_enc_dim + time_enc_dim + n_balls * 3 + n_balls + 1, hidden),
             nn.ReLU(),
             nn.Linear(hidden, 3),
             nn.Sigmoid(),
