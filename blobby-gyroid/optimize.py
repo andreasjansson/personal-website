@@ -373,6 +373,30 @@ def train_on_video(
         # This prevents the model from learning uniform density everywhere
         sparsity_loss = aux['sigma'].mean()
         loss = loss + 0.01 * sparsity_loss
+        
+        # Temporal variation loss: encourage output to change over time
+        # Sample the same pixels at two different times to ensure temporal dynamics
+        if it % 2 == 0:  # Every other iteration
+            t_other_idx = np.random.randint(0, T)
+            t_other = times[t_other_idx].item()
+            # Only add temporal loss if times are different
+            if abs(t_other - t_now) > 0.1:  # at least 0.1 sec apart
+                with torch.no_grad():
+                    target_other = video[t_other_idx, pix[:, 0], pix[:, 1]].to(device)
+                
+                pred_rgb_other, _ = render(
+                    model, rays_o, rays_d, t_other,
+                    near=0.0, far=8.0, n_samples=samples_per_ray, stratified=True
+                )
+                
+                # Temporal consistency: different times should produce different outputs
+                # But the difference should match the target difference
+                pred_temporal_diff = (pred_rgb_other - pred_rgb).abs().mean()
+                target_temporal_diff = (target_other - target).abs().mean()
+                
+                # Encourage predicted temporal variation to match target variation
+                temporal_loss = (pred_temporal_diff - target_temporal_diff).abs()
+                loss = loss + 0.1 * temporal_loss
 
         # Optional Eikonal: sample random points in volume
         if eikonal_w > 0.0:
