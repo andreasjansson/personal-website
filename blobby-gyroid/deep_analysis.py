@@ -72,7 +72,7 @@ def analyze_motion_patterns(frames):
 
 def analyze_spatial_structure(frame):
     """Detailed spatial structure analysis."""
-    gray = cv2.cvtColor((frame*255).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    gray = cv2.cvtColor((frame*255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
     
     # Gradients
     gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
@@ -81,6 +81,9 @@ def analyze_spatial_structure(frame):
     
     # Laplacian (second derivative - shows edges and blobs)
     laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    
+    # Convert gray to float for further processing
+    gray = gray.astype(np.float32) / 255.0
     
     # Local statistics (variance in local patches)
     kernel_size = 15
