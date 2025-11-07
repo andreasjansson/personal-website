@@ -161,8 +161,8 @@ class EvolvingFieldSystem(nn.Module):
         p_enc = self.positional_encoding(p, L=4)  # (N, 24) - reduced for speed
         
         # Summarize blob state
-        blob_summary = self.blob_summarizer(blob_state.reshape(-1))  # (128,)
-        blob_summary_exp = blob_summary[None, :].expand(p.shape[0], -1)  # (N, 128)
+        blob_summary = self.blob_summarizer(blob_state.reshape(-1))  # (32,)
+        blob_summary_exp = blob_summary[None, :].expand(p.shape[0], -1)  # (N, 32)
         
         # Compute density
         field_input = torch.cat([p_enc, blob_summary_exp], dim=-1)
