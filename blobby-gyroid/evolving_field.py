@@ -32,23 +32,28 @@ class EvolvingFieldSystem(nn.Module):
     2. Query field at p using positional encoding + blob influences
     """
     
-    def __init__(self, n_blobs=20, seed=0):
+    def __init__(self, n_blobs=20, hidden_dynamics=64, hidden_query=64, 
+                 hidden_summary=32, pos_enc_L=4, seed=0):
         super().__init__()
         g = torch.Generator().manual_seed(seed)
         
         self.n_blobs = n_blobs
+        self.pos_enc_L = pos_enc_L
+        pos_enc_dim = 3 * 2 * pos_enc_L  # 3 coords * 2 (sin+cos) * L
         
         # Initial blob states (learnable)
         # Each blob: [x, y, z, vx, vy, vz, size, intensity]
         self.initial_state = nn.Parameter(torch.randn(n_blobs, 8, generator=g) * 0.3)
         
-        # Evolution dynamics network: MUCH SMALLER
-        hidden = 64
-        self.dynamics_net = nn.Sequential(
-            nn.Linear(n_blobs * 8, hidden),
-            nn.Tanh(),
-            nn.Linear(hidden, n_blobs * 8),
-        )
+        # Evolution dynamics network
+        if hidden_dynamics > 0:
+            self.dynamics_net = nn.Sequential(
+                nn.Linear(n_blobs * 8, hidden_dynamics),
+                nn.Tanh(),
+                nn.Linear(hidden_dynamics, n_blobs * 8),
+            )
+        else:
+            self.dynamics_net = None
         
         # Coupling parameters (how blobs affect each other)
         self.coupling_strength = nn.Parameter(torch.ones(1) * 0.5)
@@ -57,26 +62,38 @@ class EvolvingFieldSystem(nn.Module):
         # Nonlinear interaction matrix between blobs
         self.interaction_matrix = nn.Parameter(torch.randn(n_blobs, n_blobs, generator=g) * 0.1)
         
-        # Field query network: MUCH SMALLER - use less positional encoding
-        # Input: pos_enc(p) with L=4 (24 dims) + blob_state_summary (32 dims)
-        self.field_query_net = nn.Sequential(
-            nn.Linear(24 + 32, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
-        
         # Blob state summarizer (for field query)
-        self.blob_summarizer = nn.Sequential(
-            nn.Linear(n_blobs * 8, 32),
-        )
+        if hidden_summary > 0:
+            self.blob_summarizer = nn.Sequential(
+                nn.Linear(n_blobs * 8, hidden_summary),
+            )
+        else:
+            self.blob_summarizer = None
+            hidden_summary = n_blobs * 8  # Use raw state
         
-        # Color network: MUCH SMALLER
-        self.color_net = nn.Sequential(
-            nn.Linear(24 + 32 + 1, 64),
-            nn.ReLU(),
-            nn.Linear(64, 3),
-            nn.Sigmoid(),
-        )
+        # Field query network
+        if hidden_query > 0:
+            self.field_query_net = nn.Sequential(
+                nn.Linear(pos_enc_dim + hidden_summary, hidden_query),
+                nn.ReLU(),
+                nn.Linear(hidden_query, 1),
+            )
+        else:
+            self.field_query_net = nn.Linear(pos_enc_dim + hidden_summary, 1)
+        
+        # Color network
+        if hidden_query > 0:
+            self.color_net = nn.Sequential(
+                nn.Linear(pos_enc_dim + hidden_summary + 1, hidden_query),
+                nn.ReLU(),
+                nn.Linear(hidden_query, 3),
+                nn.Sigmoid(),
+            )
+        else:
+            self.color_net = nn.Sequential(
+                nn.Linear(pos_enc_dim + hidden_summary + 1, 3),
+                nn.Sigmoid(),
+            )
         
     def positional_encoding(self, x, L=10):
         """High-frequency positional encoding."""
