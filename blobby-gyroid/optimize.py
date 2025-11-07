@@ -336,7 +336,11 @@ def train_on_video(
         opt.step()
 
         if it % 100 == 0:
-            print(f"[{it:05d}] loss={loss.item():.6f}")
+            with torch.no_grad():
+                avg_sigma = sigma.mean().item()
+                avg_weights = aux['weights'].mean().item()
+                max_weights = aux['weights'].max().item()
+            print(f"[{it:05d}] loss={loss.item():.6f} | sigma={avg_sigma:.4f} | weights avg={avg_weights:.4f} max={max_weights:.4f}")
             render_full_video(
                 model,
                 (H, W),
