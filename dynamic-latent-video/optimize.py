@@ -176,6 +176,9 @@ class LatentVideo(nn.Module):
 # ----------------------------
 # Loss helpers
 # ----------------------------
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 def frame_mse(a,b): return ((a-b)**2).mean()
 
 def jerk_penalty(frames):
