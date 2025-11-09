@@ -165,45 +165,44 @@ class Fractal2DNonDiff(nn.Module):
         return self.child_indices[1]
 
     def forward(self, max_depth: int) -> torch.Tensor:
-        """
-        Parallel implementation of fractal generation using GPU
-        """
         batch_size = self.num_points_x * self.num_points_y
-
-        # Initialize with all pixels assigned to the root node (index 0)
         current_indices = torch.zeros(batch_size, dtype=torch.long, device=self.device)
 
-        # Use pre-computed grid points
-        x_positions = self.grid_points[:, 0]
-        y_positions = self.grid_points[:, 1]
+        # Initialize the bounding box for each point as the entire unit square
+        min_x = torch.zeros(batch_size, dtype=self.dtype, device=self.device)
+        max_x = torch.ones(batch_size, dtype=self.dtype, device=self.device)
+        min_y = torch.zeros(batch_size, dtype=self.dtype, device=self.device)
+        max_y = torch.ones(batch_size, dtype=self.dtype, device=self.device)
 
-        # Process all depths in sequence, but process all pixels in parallel
         for depth in range(max_depth):
-            # Get split parameters for current nodes
             curr_directions = self.split_directions[current_indices]
             curr_split_points = self.split_points[current_indices]
 
+            # Convert split_points to actual split positions in the bounding box
+            split_x = min_x + curr_split_points * (max_x - min_x)
+            split_y = min_y + curr_split_points * (max_y - min_y)
+
             # Determine which side of the split each pixel falls on
-            # For horizontal splits (direction=0): compare x position to split
-            h_is_left = x_positions < curr_split_points
+            h_is_left = (curr_directions == 0) & (self.grid_points[:, 0] < split_x)
+            v_is_left = (curr_directions == 1) & (self.grid_points[:, 1] < split_y)
+            is_left = h_is_left | v_is_left
 
-            # For vertical splits (direction=1): compare y position to split
-            v_is_left = y_positions < curr_split_points
-
-            # Blend based on direction (0=horizontal, 1=vertical)
-            is_left = torch.where(curr_directions == 0, h_is_left, v_is_left)
-
-            # Determine child indices based on which side of the split
+            # Get the indices of the children
             left_children = self.left_child_indices[current_indices]
             right_children = self.right_child_indices[current_indices]
 
-            # Update current indices based on which side of the split
+            # Update current indices
             current_indices = torch.where(is_left, left_children, right_children)
 
-        # After processing all depths, map to final class values
-        final_classes = self.classes[current_indices]
+            # Update bounding boxes
+            min_x, max_x = torch.where(h_is_left.unsqueeze(-1),
+                                       torch.stack([min_x, split_x], dim=-1),
+                                       torch.stack([split_x, max_x], dim=-1)).unbind(dim=-1)
+            min_y, max_y = torch.where(v_is_left.unsqueeze(-1),
+                                       torch.stack([min_y, split_y], dim=-1),
+                                       torch.stack([split_y, max_y], dim=-1)).unbind(dim=-1)
 
-        # Reshape back to grid
+        final_classes = self.classes[current_indices]
         return final_classes.reshape(self.num_points_x, self.num_points_y)
 
     def forward_old(self, max_depth: int) -> torch.Tensor:

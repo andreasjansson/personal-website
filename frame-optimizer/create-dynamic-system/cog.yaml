@@ -1,9 +1,4 @@
 build:
   python_version: "3.12"
-  python_packages:
-    - "numpy==2.2.3"
-    - "torch==2.5.1"
-    - "pillow==11.1.0"
-    - "matplotlib"
 
 predict: "create_dynamic_system.py:create_dynamic_system"

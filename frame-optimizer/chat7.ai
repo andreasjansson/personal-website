@@ -25,65 +25,315 @@ fractal2d_nondiff.py:
 fractal2d_diff.py:
 <ai-context>/Users/andreas/projects/personal-website/frame-optimizer/fractal2d_diff.py</ai-context>
 
-Fractal2DDiff.forward(depth, temperature=0.0001) (note the very low temperature, which should produce hard boundaries!) and Fractal2DNonDiff.forward(depth)  produces slightly different images, where the differences get more pronounced the higher the max_depth. I've converted a Fractal2DNonDiff to diff using model.to_diff(). Could it have to do with the < comparison in x_positions[horizontal_mask] < split_x[horizontal_mask], which may cause rounding differences compared to the diff version?
-
-In Fractal2DNonDiff, could you try making the split point logic more similar to the diff version?
+In train_fractal's CrossEntropyLoss loss, add a loss term for the middle bit like we do in compute_loss.
 
 ## ASSISTANT:
 
-You're right that the difference between the two implementations might be related to how the splits are performed. Let's modify the Fractal2DNonDiff to make its split logic more similar to the differentiable version.
+Let me help you modify the loss function in the `train_fractal` function to include a loss term similar to the one in `compute_loss`. Looking at the code, I notice that `compute_loss` uses an accuracy-based approach for calculating loss.
 
-In the differentiable version, the splits use sigmoid to create a smooth transition, while the non-differentiable version uses a hard comparison. Even with a very low temperature, there might be slight numerical differences. Let's update the Fractal2DNonDiff forward method to make it closer to the differentiable implementation:
+Here's how you can modify the function to incorporate a similar middle loss term:
 
 ```python
-def forward(self, max_depth: int) -> torch.Tensor:
-    """
-    Parallel implementation of fractal generation using GPU
-    """
-    batch_size = self.num_points_x * self.num_points_y
+def train_fractal(
+    model,
+    target_image,
+    max_depth,
+    num_iterations=2000,
+    # Other parameters...
+):
+    # Existing code...
 
-    # Initialize with all pixels assigned to the root node (index 0)
-    current_indices = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+    def closure():
+        is_sa = isinstance(optimizer.current_optimizer, SimulatedAnnealing)
+        grad_class = torch.no_grad if is_sa else torch.enable_grad
+        with grad_class():
+            optimizer.zero_grad()
 
-    # Use pre-computed grid points
-    x_positions = self.grid_points[:, 0]
-    y_positions = self.grid_points[:, 1]
+            # Get prediction at specified depth
+            predicted = model(max_depth, temperature=temperature, hard=is_sa)
 
-    # Process all depths in sequence, but process all pixels in parallel
-    for depth in range(max_depth):
-        # Get split parameters for current nodes
-        curr_directions = self.split_directions[current_indices]
-        curr_split_points = self.split_points[current_indices]
+            # Add a middle term prediction at a higher depth
+            middle_depth = max_depth + 3  # Using max_depth + 3 as in compute_loss
+            middle_predicted = model(middle_depth, temperature=temperature, hard=is_sa)
 
-        # Determine which side of the split each pixel falls on
-        # For horizontal splits (direction=0): compare x position to split
-        h_is_left = x_positions < curr_split_points
+            # Calculate losses
+            if is_sa:
+                # For SA, use accuracy-based losses similar to compute_loss
+                recon_loss = 10 * (1 - (torch.sum(predicted == target_image) / len(target_image.flatten())))
+                middle_loss = 10 * (1 - (torch.sum(middle_predicted == target_image) / len(target_image.flatten())))
+            else:
+                # For differentiable optimization, use CrossEntropyLoss
+                recon_loss = nn.CrossEntropyLoss()(
+                    predicted.reshape(-1, model.num_classes),
+                    target_image.reshape(-1)
+                )
+                middle_loss = nn.CrossEntropyLoss()(
+                    middle_predicted.reshape(-1, model.num_classes),
+                    target_image.reshape(-1)
+                )
 
-        # For vertical splits (direction=1): compare y position to split
-        v_is_left = y_positions < curr_split_points
+            # Combine losses
+            loss = recon_loss + middle_loss
 
-        # Blend based on direction (0=horizontal, 1=vertical)
-        is_left = torch.where(curr_directions == 0, h_is_left, v_is_left)
+            if not is_sa:
+                loss.backward()
 
-        # Determine child indices based on which side of the split
-        left_children = self.left_child_indices[current_indices]
-        right_children = self.right_child_indices[current_indices]
-
-        # Update current indices based on which side of the split
-        current_indices = torch.where(is_left, left_children, right_children)
-
-    # After processing all depths, map to final class values
-    final_classes = self.classes[current_indices]
-
-    # Reshape back to grid
-    return final_classes.reshape(self.num_points_x, self.num_points_y)
+            return loss
 ```
 
-This modified implementation removes the bounding box updates and makes the split comparison directly with the original grid coordinates, which is more aligned with how the differentiable version works. The key differences:
+This modification:
 
-1. The original non-differentiable version calculated split positions based on normalized coordinates within the current bounding box.
-2. The new implementation uses the direct comparison of grid coordinates with split points, similar to the differentiable version.
+1. Adds a prediction at `max_depth + 3` as done in `compute_loss`
+2. Calculates a loss for this prediction
+3. Adds this "middle loss" to the original reconstruction loss
+4. Handles both the differentiable (CrossEntropyLoss) and non-differentiable (accuracy-based) cases
 
-This should make the two implementations more consistent. The remaining difference is that the differentiable version uses sigmoid for smooth transitions, while this still uses hard comparisons, but with a very low temperature in the differentiable version, this difference should be minimal.
+The combined loss will encourage the model to optimize for both depths simultaneously, which can help avoid overfitting to a specific depth and potentially create more generalizable fractal patterns.
+
+## USER:
+
+Create a much simpler dynamic iterated system with <10 variables, that still produces 2d images where every other cycle it's optimized to resemble target image 1 and 2. the system needs to be differentiable and optimized with sgd (or adam)
+
+## ASSISTANT:
+
+Here's a simple dynamic iterated system that produces 2D images and can be optimized to alternate between resembling two different target images:
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+import numpy as np
+
+class SimpleIteratedSystem(nn.Module):
+    def __init__(
+        self,
+        grid_size=64,
+        num_params=8,
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    ):
+        super().__init__()
+        self.grid_size = grid_size
+        self.device = device
+
+        # Create 8 parameters that define our system
+        # 4 for transformation matrix, 2 for offset, 2 for nonlinearity control
+        self.a = nn.Parameter(torch.randn(4, device=device) * 0.1)  # 2x2 matrix elements
+        self.b = nn.Parameter(torch.randn(2, device=device) * 0.1)  # offset vector
+        self.c = nn.Parameter(torch.randn(2, device=device) * 0.1)  # nonlinearity parameters
+
+        # Create the initial state (grid coordinates)
+        y, x = torch.meshgrid(
+            torch.linspace(-1, 1, grid_size, device=device),
+            torch.linspace(-1, 1, grid_size, device=device),
+            indexing='ij'
+        )
+        self.initial_state = torch.stack([x, y], dim=-1)  # [grid_size, grid_size, 2]
+
+        # Track history for visualization
+        self.reset_history()
+
+    def reset_history(self):
+        self.history = {
+            "loss": [],
+            "iterations": []
+        }
+
+    def forward(self, num_iterations, normalize=True):
+        """Generate images by iterating the system for a specified number of steps"""
+        batch_size = self.grid_size * self.grid_size
+
+        # Reshape initial state for batch processing
+        state = self.initial_state.reshape(batch_size, 2)  # [batch_size, 2]
+
+        # Extract matrix A from parameters
+        A = self.a.reshape(2, 2)  # 2x2 transformation matrix
+
+        # Iterate the system
+        for i in range(num_iterations):
+            # Apply affine transformation: x' = Ax + b
+            state = torch.matmul(state, A.t()) + self.b
+
+            # Apply nonlinear transformation with controlled parameters
+            state = torch.tanh(state * (1 + self.c.unsqueeze(0)))
+
+        # Reshape to image
+        result = torch.sum(state.abs(), dim=1).reshape(self.grid_size, self.grid_size)
+
+        # Normalize to [0, 1] range if requested
+        if normalize:
+            result = (result - result.min()) / (result.max() - result.min() + 1e-8)
+
+        return result
+
+    def track_iteration(self, iteration, loss):
+        self.history["loss"].append(loss.item())
+        self.history["iterations"].append(iteration)
+
+    def plot_results(self, target1, target2, epochs_shown=4, figsize=(12, 8)):
+        """Plot the current system outputs alongside target images and loss history"""
+        with torch.no_grad():
+            # Generate outputs at different iteration counts
+            outputs = {i: self.forward(i) for i in range(1, epochs_shown+1)}
+
+        # Create figure
+        fig = plt.figure(figsize=figsize)
+        grid = plt.GridSpec(2, epochs_shown+2, height_ratios=[1, 4])
+
+        # Plot loss history
+        ax_loss = fig.add_subplot(grid[0, :])
+        if self.history["loss"]:
+            ax_loss.plot(
+                self.history["iterations"],
+                self.history["loss"],
+                color="blue",
+                label="Loss"
+            )
+            ax_loss.set_xlabel("Iteration")
+            ax_loss.set_ylabel("Loss")
+            ax_loss.set_title(f"Training Loss")
+            ax_loss.grid(True)
+        else:
+            ax_loss.text(0.5, 0.5, "No optimization history", ha="center", va="center")
+            ax_loss.set_xticks([])
+            ax_loss.set_yticks([])
+
+        # Plot target images
+        ax_target1 = fig.add_subplot(grid[1, 0])
+        ax_target1.imshow(target1.cpu().numpy(), cmap='viridis')
+        ax_target1.set_title("Target 1")
+        ax_target1.axis('off')
+
+        ax_target2 = fig.add_subplot(grid[1, 1])
+        ax_target2.imshow(target2.cpu().numpy(), cmap='viridis')
+        ax_target2.set_title("Target 2")
+        ax_target2.axis('off')
+
+        # Plot outputs at different iterations
+        for i, epoch in enumerate(range(1, epochs_shown+1)):
+            ax = fig.add_subplot(grid[1, i+2])
+            output = outputs[epoch].cpu().numpy()
+            ax.imshow(output, cmap='viridis')
+
+            # Compute similarity metrics to both targets
+            sim1 = -torch.nn.functional.mse_loss(outputs[epoch], target1).item()
+            sim2 = -torch.nn.functional.mse_loss(outputs[epoch], target2).item()
+
+            # Show which target this iteration is closer to
+            closer_to = "Target 1" if sim1 > sim2 else "Target 2"
+            ax.set_title(f"Epoch {epoch}\nCloser to {closer_to}")
+            ax.axis('off')
+
+        plt.tight_layout()
+        plt.show()
+
+
+def optimize_iterated_system(
+    model,
+    target1,
+    target2,
+    num_iterations=1000,
+    learning_rate=0.01,
+    plot_every=100
+):
+    """Optimize the iterated system to alternate between resembling two target images"""
+
+    # Move targets to the same device as model
+    target1 = target1.to(device=model.device)
+    target2 = target2.to(device=model.device)
+
+    # Create optimizer
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Optimization loop
+    for i in range(num_iterations):
+        def closure():
+            optimizer.zero_grad()
+
+            # Generate outputs at even and odd iterations
+            output_even = model(2)  # Even iterations should match target1
+            output_odd = model(3)   # Odd iterations should match target2
+
+            # Compute loss as MSE to respective targets
+            loss_even = nn.functional.mse_loss(output_even, target1)
+            loss_odd = nn.functional.mse_loss(output_odd, target2)
+
+            # Total loss is the sum
+            loss = loss_even + loss_odd
+            loss.backward()
+
+            return loss
+
+        # Perform optimization step
+        loss = optimizer.step(closure)
+
+        # Track progress
+        model.track_iteration(i, loss)
+
+        # Visualize progress
+        if i % plot_every == 0 or i == num_iterations - 1:
+            print(f"Iteration {i}, Loss: {loss.item():.6f}")
+            model.plot_results(target1, target2)
+
+    return model
+
+
+# Example usage with sample targets:
+def create_sample_targets(grid_size=64, device="cuda" if torch.cuda.is_available() else "cpu"):
+    """Create simple sample target images"""
+    # Target 1: A circle
+    y, x = torch.meshgrid(
+        torch.linspace(-1, 1, grid_size, device=device),
+        torch.linspace(-1, 1, grid_size, device=device),
+        indexing='ij'
+    )
+    target1 = ((x**2 + y**2) < 0.5**2).float()
+
+    # Target 2: A square
+    target2 = ((x.abs() < 0.5) & (y.abs() < 0.5)).float()
+
+    return target1, target2
+
+
+# Main execution
+if __name__ == "__main__":
+    # Device setup
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Create sample targets
+    grid_size = 64
+    target1, target2 = create_sample_targets(grid_size, device)
+
+    # Create and train model
+    model = SimpleIteratedSystem(grid_size=grid_size, device=device)
+
+    # Optimize the model
+    model = optimize_iterated_system(
+        model,
+        target1,
+        target2,
+        num_iterations=500,
+        learning_rate=0.01,
+        plot_every=100
+    )
+```
+
+This system has just 8 learnable parameters:
+1. Four parameters (`self.a`) that form a 2×2 transformation matrix
+2. Two parameters (`self.b`) that define an offset vector
+3. Two parameters (`self.c`) that control nonlinearity scaling
+
+The dynamics work as follows:
+1. Start with a grid of (x,y) coordinates
+2. Apply an affine transformation: x' = Ax + b
+3. Apply a nonlinear transformation using tanh with learnable scaling
+4. Repeat the process for a specified number of iterations
+5. Convert the final state to an image by taking the absolute sum
+
+The optimization objective is to make the system produce:
+- An image resembling target1 after an even number of iterations (2)
+- An image resembling target2 after an odd number of iterations (3)
+
+This creates a system that alternates between two different patterns as it evolves, demonstrating how simple deterministic systems with very few parameters can produce complex behaviors that vary predictably over time.
 
 ## USER:

@@ -26,7 +26,7 @@ def optimize_fractal2d(
     sa_num_restarts: int = 3,
     sa_step_size: float = 0.1,
     color_map: np.ndarray = None,
-    plot_every_n: int = 50,
+    plot_every_n: int = 200,
 ) -> Fractal2DNonDiff:
     # Move target image to device
     target_image = target_image.to(device=model.device, dtype=torch.long)
@@ -174,6 +174,8 @@ def train_fractal(
     temperature_end=0.004,
     plot_every_n=10,
     color_map=None,
+        max_depth=5,
+        warmup=True,
 ):
     """
     Train the fractal model to match the target image.
@@ -211,9 +213,12 @@ def train_fractal(
         optimizer.zero_grad()
 
         # Forward pass - use different depths for different phases of training
-        max_depth = min(5, 1 + i // 30)  # Start shallow, gradually increase depth
+        if warmup:
+            depth = min(max_depth, 1 + i // 30)  # Start shallow, gradually increase depth
+        else:
+            depth = max_depth
 
-        output = model(max_depth=max_depth, temperature=temperature, hard=False)
+        output = model(max_depth=depth, temperature=temperature, hard=False)
         output_flat = output.reshape(-1, model.num_classes)
 
         # Calculate loss
@@ -229,13 +234,13 @@ def train_fractal(
         model.track_iteration(i, loss)
         if (i + 1) % plot_every_n == 0:
             model.plot_history(
-                [max_depth, max_depth + 2],
+                [depth, depth + 2],
                 target_image=target_image,
                 temperature=temperature,
                 color_map=color_map,
             )
 
-    return model, loss_history
+    return model
 
 
 def optimize_fractal_function_diff(
@@ -419,3 +424,150 @@ def load_and_quantize_image(
     print(f"Image quantized to {num_classes} colors.")
 
     return quantized_tensor, centers
+
+
+class EdgeAwareLoss(nn.Module):
+    def __init__(
+        self,
+        num_classes: int,
+        color_map: np.ndarray,
+        edge_weight: float = 0.5,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    ):
+        """
+        A loss function that combines classification loss with edge-awareness.
+
+        Args:
+            num_classes: Number of classes in the segmentation
+            color_map: Array of shape [num_classes, 3] with RGB values for each class
+            edge_weight: Weight for the edge detection component
+            device: Computation device
+        """
+        super().__init__()
+        self.num_classes = num_classes
+        self.color_map = torch.tensor(color_map / 255.0, device=device, dtype=torch.float32)
+        self.edge_weight = edge_weight
+        self.device = device
+        self.classification_loss = nn.CrossEntropyLoss()
+
+        # Create Sobel filters for edge detection
+        self.sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                   dtype=torch.float32, device=device).view(1, 1, 3, 3)
+        self.sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                   dtype=torch.float32, device=device).view(1, 1, 3, 3)
+
+        # Cache for target edge map
+        self.target_edges = None
+
+    def _compute_edge_map(self, rgb_image: torch.Tensor) -> torch.Tensor:
+        """
+        Compute edge map from RGB image.
+
+        Args:
+            rgb_image: Tensor of shape [..., 3] containing RGB values
+
+        Returns:
+            Edge map tensor
+        """
+        # Convert RGB to grayscale
+        if rgb_image.dim() == 3:  # [H, W, 3]
+            gray = (0.299 * rgb_image[..., 0] +
+                    0.587 * rgb_image[..., 1] +
+                    0.114 * rgb_image[..., 2])
+            # Add batch and channel dimensions
+            gray = gray.unsqueeze(0).unsqueeze(0)
+        else:  # [B, H, W, 3]
+            gray = (0.299 * rgb_image[..., 0] +
+                    0.587 * rgb_image[..., 1] +
+                    0.114 * rgb_image[..., 2])
+            # Add channel dimension
+            gray = gray.unsqueeze(1)
+
+        # Compute edges
+        edges_x = nn.functional.conv2d(gray, self.sobel_x, padding=1)
+        edges_y = nn.functional.conv2d(gray, self.sobel_y, padding=1)
+        edges = torch.sqrt(edges_x**2 + edges_y**2)
+
+        return edges
+
+    def _class_indices_to_rgb(self, indices: torch.Tensor) -> torch.Tensor:
+        """
+        Convert class indices to RGB values using the color map.
+
+        Args:
+            indices: Tensor with class indices
+
+        Returns:
+            Tensor with RGB values
+        """
+        # One-hot encode the indices to create masks for each class
+        one_hot = nn.functional.one_hot(indices, self.num_classes).float()
+
+        # Reshape one_hot to [*, num_classes, 1] and multiply with color_map [num_classes, 3]
+        # to get [*, num_classes, 3], then sum over classes to get [*, 3]
+        if indices.dim() == 2:  # [H, W]
+            rgb = torch.einsum('hwc,cd->hwd', one_hot, self.color_map)
+        else:  # [B, H, W]
+            rgb = torch.einsum('bhwc,cd->bhwd', one_hot, self.color_map)
+
+        return rgb
+
+    def _probs_to_rgb(self, probs: torch.Tensor) -> torch.Tensor:
+        """
+        Convert class probabilities to RGB values using the color map.
+
+        Args:
+            probs: Tensor with class probabilities [..., num_classes]
+
+        Returns:
+            Tensor with RGB values
+        """
+        # Multiply probabilities with color map and sum over classes
+        if probs.dim() == 3:  # [H, W, C]
+            rgb = torch.einsum('hwc,cd->hwd', probs, self.color_map)
+        else:  # [B, H, W, C]
+            rgb = torch.einsum('bhwc,cd->bhwd', probs, self.color_map)
+
+        return rgb
+
+    def compute_target_edges(self, target: torch.Tensor):
+        """
+        Compute and cache the edge map for the target image.
+
+        Args:
+            target: Target tensor with class indices [H, W] or [B, H, W]
+        """
+        target_rgb = self._class_indices_to_rgb(target)
+        self.target_edges = self._compute_edge_map(target_rgb)
+
+    def forward(self,
+                pred_probs: torch.Tensor,
+                target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Compute combined loss.
+
+        Args:
+            pred_probs: Predicted class probabilities [..., num_classes]
+            target: Target class indices
+
+        Returns:
+            Tuple of (total_loss, classification_loss, edge_loss)
+        """
+        # Ensure target edges are computed
+        if self.target_edges is None:
+            self.compute_target_edges(target)
+
+        # Compute classification loss
+        target_flat = target.reshape(-1)
+        pred_flat = pred_probs.reshape(-1, self.num_classes)
+        cls_loss = self.classification_loss(pred_flat, target_flat)
+
+        # Compute edge loss
+        pred_rgb = self._probs_to_rgb(pred_probs)
+        pred_edges = self._compute_edge_map(pred_rgb)
+        edge_loss = nn.functional.mse_loss(pred_edges, self.target_edges)
+
+        # Combined loss
+        total_loss = cls_loss + self.edge_weight * edge_loss
+
+        return total_loss, cls_loss, edge_loss

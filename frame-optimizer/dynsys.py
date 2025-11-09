@@ -59,7 +59,7 @@ class DynamicSystemTrainer:
         """Count the total number of trainable parameters in the model."""
         return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
 
-    def train_morphing(
+    def train(
         self,
         target1: torch.Tensor,
         target2: torch.Tensor,
@@ -325,7 +325,7 @@ def main():
         plt.show()
 
     # Train model
-    losses2 = trainer.train_morphing(
+    losses2 = trainer.train(
         target1, target2, num_iterations=2000, visualize_every=200
     )
 
