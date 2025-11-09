@@ -329,11 +329,13 @@ def train(
     for it in range(1, iters + 1):
         model.train()
         # Roll out beyond training so X[t+2n] exists
-        T_need = T + 2 * offset_n
+        # We need: t < T (for Y[t]), and t+2*offset_n must be rollout-able
+        max_t = T  # We can sample any t in training range since we match X[t+2n] to Y[t], not Y[t+2n]
+        T_need = max_t + 2 * offset_n  # Ensure we can rollout to t+2*offset_n for any valid t
         zs = model.rollout(T_need)  # (T_need, D)
 
-        # sample times ensuring t < T and t+2n < T_need
-        t = torch.randint(0, T, (1,), device=device).item()
+        # sample times ensuring t < T (for Y[t])
+        t = torch.randint(0, max_t, (1,), device=device).item()
         idx = torch.randint(0, HW, (pixels_per_step,), device=device)
 
         # decode only needed frames and pixels
