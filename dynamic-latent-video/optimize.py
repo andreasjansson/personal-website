@@ -363,7 +363,7 @@ def train(
                     grad_stats[component].append(param.grad.abs().mean().item())
             
             print(
-                f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f} jerk={loss_jerk.item():.6f}"
+                f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f}"
             )
             print(f"        Gradient stats:")
             for comp in ['z0', 'f', 'g']:
@@ -374,7 +374,7 @@ def train(
                   f"max={model.z0.data.max().item():.6f}, min={model.z0.data.min().item():.6f}")
         else:
             print(
-                f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f} jerk={loss_jerk.item():.6f}"
+                f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f}"
             )
         
         opt.step()
