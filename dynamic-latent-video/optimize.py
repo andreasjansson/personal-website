@@ -343,7 +343,9 @@ def train(
         x_t = decode_pixels(t, zs[t])
         x_t2n = decode_pixels(t + 2 * offset_n, zs[t + 2 * offset_n])
         y_t = flatY[t, idx]
-        loss_rec = frame_mse(x_t, y_t) + frame_mse(x_t2n, y_t)
+        loss_mse_t = frame_mse(x_t, y_t)
+        loss_mse_t2n = frame_mse(x_t2n, y_t)
+        loss_rec = loss_mse_t + loss_mse_t2n
 
         # small latent magnitude regularizer
         loss_lat = zs.pow(2).mean() * 1e-4
