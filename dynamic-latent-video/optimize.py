@@ -286,8 +286,24 @@ def train(
     Y = Y.to(device)
     model = LatentVideo(H, W, dim_z=latent_dim).to(device)
 
+    # Calculate output resolution with aspect ratio handling
+    if output_width is None and output_height is None:
+        out_H, out_W = H, W
+    elif output_width is not None and output_height is None:
+        out_W = output_width
+        out_H = int(round(out_W * H / W))
+    elif output_width is None and output_height is not None:
+        out_H = output_height
+        out_W = int(round(out_H * W / H))
+    else:
+        out_W, out_H = output_width, output_height
+        expected_H = int(round(out_W * H / W))
+        if abs(out_H - expected_H) > 1:
+            print(f"Warning: Output aspect ratio {out_W}x{out_H} doesn't match training {W}x{H}")
+
     print(f"\n=== Model Architecture ===")
-    print(f"Video: {T} frames @ {H}x{W}")
+    print(f"Training: {T} frames @ {H}x{W}")
+    print(f"Output: {T} frames @ {out_H}x{out_W}")
     print(f"Latent dim (Z): {latent_dim}")
     print(f"Decoder g (X): {count_parameters(model.g):,} parameters")
     print(f"Dynamics f (Z): {count_parameters(model.f):,} parameters")
