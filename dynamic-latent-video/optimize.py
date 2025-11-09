@@ -352,7 +352,7 @@ def train(
         opt.zero_grad(set_to_none=True)
         loss.backward()
         
-        if it % 20 == 0:
+        if it % 200 == 0:
             # Collect gradient statistics
             grad_stats = {}
             for name, param in model.named_parameters():
@@ -379,13 +379,13 @@ def train(
         
         opt.step()
 
-        if it % 20 == 0:
+        if it % 200 == 0:
             model.eval()
             with torch.no_grad():
-                zs_render = model.rollout(T, with_detach=True)
+                zs_render = model.rollout(T * 3, with_detach=True)
                 X_render = model.decode_frames_at_resolution(zs_render, out_H, out_W)
                 save_video(X_render, f"checkpoint_iter_{it:05d}.mp4", fps)
-                print(f"Saved checkpoint_iter_{it:05d}.mp4")
+                print(f"Saved checkpoint_iter_{it:05d}.mp4 (3x duration: {T*3} frames)")
             model.train()
 
     return model, fps, T, out_H, out_W
