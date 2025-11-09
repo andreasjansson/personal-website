@@ -328,31 +328,33 @@ def train(
 
     for it in range(1, iters + 1):
         model.train()
-        # Roll out beyond training so X[t+2n] exists
-        # We need: t < T (for Y[t]), and t+2*offset_n must be rollout-able
-        max_t = T  # We can sample any t in training range since we match X[t+2n] to Y[t], not Y[t+2n]
-        T_need = max_t + 2 * offset_n  # Ensure we can rollout to t+2*offset_n for any valid t
-        zs = model.rollout(T_need)  # (T_need, D)
+        # Rollout for 3*offset_n timesteps, then match:
+        # - frames [0:offset_n] to Y
+        # - frames [2*offset_n:3*offset_n] to Y (these are at t+2*offset_n)
+        zs = model.rollout(3 * offset_n)  # (3*offset_n, D)
 
-        # sample times ensuring t < T (for Y[t])
-        t = torch.randint(0, max_t, (1,), device=device).item()
+        # Sample random pixels for efficiency
         idx = torch.randint(0, HW, (pixels_per_step,), device=device)
 
-        # decode only needed frames and pixels
-        def decode_pixels(t_idx, z_t):
-            # chunked decode to (B,3)
-            out = []
-            c = 32768
-            for s in range(0, pixels_per_step, c):
-                e = min(s + c, pixels_per_step)
-                out.append(model.g(grid[idx[s:e]], z_t.unsqueeze(0)))
-            return torch.cat(out, 0)
-
-        x_t = decode_pixels(t, zs[t])
-        x_t2n = decode_pixels(t + 2 * offset_n, zs[t + 2 * offset_n])
-        y_t = flatY[t, idx]
-        loss_mse_t = frame_mse(x_t, y_t)
-        loss_mse_t2n = frame_mse(x_t2n, y_t)
+        # Decode first segment (frames 0 to offset_n-1)
+        def decode_frames_pixels(start_t, end_t):
+            # Decode multiple frames at sampled pixel locations
+            all_pixels = []
+            for t in range(start_t, end_t):
+                out = []
+                c = 32768
+                for s in range(0, pixels_per_step, c):
+                    e = min(s + c, pixels_per_step)
+                    out.append(model.g(grid[idx[s:e]], zs[t].unsqueeze(0)))
+                all_pixels.append(torch.cat(out, 0))
+            return torch.stack(all_pixels, 0)  # (T, pixels, 3)
+        
+        x_first = decode_frames_pixels(0, offset_n)  # First n frames
+        x_last = decode_frames_pixels(2 * offset_n, 3 * offset_n)  # Last n frames (at t+2n)
+        y_target = flatY[:offset_n, idx]  # Target frames
+        
+        loss_mse_t = frame_mse(x_first, y_target)
+        loss_mse_t2n = frame_mse(x_last, y_target)
         loss_rec = loss_mse_t + loss_mse_t2n
 
         # small latent magnitude regularizer
