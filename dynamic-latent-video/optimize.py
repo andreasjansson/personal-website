@@ -271,6 +271,8 @@ def train(
     pixels_per_step=8192,
     lr=2e-3,
     device="mps",
+    output_width=None,
+    output_height=None,
 ):
     if device == "cuda":
         device = torch.device(device if torch.cuda.is_available() else "cpu")
