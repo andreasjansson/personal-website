@@ -441,8 +441,8 @@ if __name__ == "__main__":
                    help="Number of training iterations (default: 6000)")
     p.add_argument("--lr", type=float, default=2e-3,
                    help="Learning rate for Adam optimizer (default: 0.002)")
-    p.add_argument("--offset_n", type=int, default=8,
-                   help="Frame offset for stability loss: match X[t] and X[t+2n] to same target Y[t] (default: 8)")
+    p.add_argument("--offset_n", type=int, default=None,
+                   help="Frame offset for stability loss: match X[t] and X[t+2n] to same target Y[t]. Default: T (video length) for long-term stability")
     p.add_argument("--device", default="mps",
                    help="Device to train on: 'mps', 'cuda', or 'cpu' (default: mps)")
     
