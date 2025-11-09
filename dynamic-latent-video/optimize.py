@@ -314,6 +314,7 @@ def train(
     print(f"Training: {T} frames @ {H}x{W}")
     print(f"Output: {T} frames @ {out_H}x{out_W}")
     print(f"Latent dim (Z): {latent_dim}")
+    print(f"Offset n: {offset_n} (matching X[t] and X[t+{2*offset_n}] to Y[t])")
     print(f"Decoder g (X): {count_parameters(model.g):,} parameters")
     print(f"Dynamics f (Z): {count_parameters(model.f):,} parameters")
     print(f"Total: {count_parameters(model):,} parameters")
