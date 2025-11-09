@@ -458,5 +458,8 @@ if __name__ == "__main__":
         device=args.device,
         output_width=args.output_width,
         output_height=args.output_height,
+        decoder_hidden=args.decoder_hidden,
+        decoder_layers=args.decoder_layers,
+        dynamics_hidden=args.dynamics_hidden,
     )
     render_model(model, fps, T, T_extra=180, out_path="reconstruction.mp4", out_H=out_H, out_W=out_W)
