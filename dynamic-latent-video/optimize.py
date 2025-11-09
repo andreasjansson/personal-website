@@ -190,10 +190,25 @@ def jerk_penalty(frames):
 # ----------------------------
 def train(mp4_path, iters=4000, resize_width=320, latent_dim=64,
           offset_n=8, pixels_per_step=8192, lr=2e-3, device='mps'):
-    device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    if device == 'cuda':
+        device = torch.device(device if torch.cuda.is_available() else 'cpu')
+    elif device == 'mps':
+        device = torch.device(device if torch.backends.mps.is_available() else 'cpu')
+    else:
+        device = torch.device(device)
+    
     Y, fps = load_video(mp4_path, resize_width=resize_width)
     T,H,W,_ = Y.shape; Y = Y.to(device)
     model = LatentVideo(H,W,dim_z=latent_dim).to(device)
+    
+    print(f"\n=== Model Architecture ===")
+    print(f"Video: {T} frames @ {H}x{W}")
+    print(f"Latent dim (Z): {latent_dim}")
+    print(f"Decoder g (X): {count_parameters(model.g):,} parameters")
+    print(f"Dynamics f (Z): {count_parameters(model.f):,} parameters")
+    print(f"Total: {count_parameters(model):,} parameters")
+    print(f"Device: {device}\n")
+    
     opt = torch.optim.Adam(model.parameters(), lr=lr)
 
     HW = H*W
