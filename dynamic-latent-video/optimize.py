@@ -282,6 +282,11 @@ def train(
     Y, fps = load_video(mp4_path, resize_width=resize_width)
     T, H, W, _ = Y.shape
     Y = Y.to(device)
+    
+    # If offset_n not explicitly set, use T for long-term stability
+    if offset_n is None:
+        offset_n = T
+    
     model = LatentVideo(
         H, W, 
         dim_z=latent_dim, 
