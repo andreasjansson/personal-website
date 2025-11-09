@@ -481,4 +481,4 @@ if __name__ == "__main__":
         decoder_layers=args.decoder_layers,
         dynamics_hidden=args.dynamics_hidden,
     )
-    render_model(model, fps, T, T_extra=2*T, out_path="reconstruction.mp4", out_H=out_H, out_W=out_W)
+    render_model(model, fps, T, T_extra=5*T, out_path="reconstruction.mp4", out_H=out_H, out_W=out_W)
