@@ -404,10 +404,13 @@ def train(
 # Reconstruct training window and extrapolate
 # ----------------------------
 @torch.no_grad()
-def render_model(model, fps, T_train, T_extra=120, out_path="reconstruction.mp4"):
+def render_model(model, fps, T_train, T_extra=120, out_path="reconstruction.mp4", out_H=None, out_W=None):
     model.eval()
     zs = model.rollout(T_train + T_extra, with_detach=True)
-    X = model.decode_frames(zs)
+    if out_H is not None and out_W is not None:
+        X = model.decode_frames_at_resolution(zs, out_H, out_W)
+    else:
+        X = model.decode_frames(zs)
     save_video(X[:T_train], out_path.replace(".mp4", "_fit.mp4"), fps)
     save_video(X[T_train:], out_path.replace(".mp4", "_extrap.mp4"), fps)
     print(
