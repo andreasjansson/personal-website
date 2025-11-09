@@ -287,8 +287,6 @@ def train(
     flatY = Y.reshape(T, HW, 3)
 
     for it in range(1, iters + 1):
-        print(f"Starting tieration {it}")
-
         model.train()
         # Roll out a bit beyond training so X[t+2n] exists
         T_need = min(T + 2 * offset_n, T + 2 * offset_n)
