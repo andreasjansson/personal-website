@@ -345,23 +345,10 @@ def train(
         y_t = flatY[t, idx]
         loss_rec = frame_mse(x_t, y_t) + frame_mse(x_t2n, y_t)
 
-        # small global temporal smoothness (jerk) on a tiny low-res render
-        with torch.no_grad():
-            small_idx = torch.linspace(0, HW - 1, steps=4096, device=device).long()
-        X_small = []
-        for tt in (t - 1, t, t + 1):
-            if tt < 0 or tt >= T:
-                continue
-            X_small.append(model.g(grid[small_idx], zs[tt].unsqueeze(0)))
-        loss_jerk = torch.tensor(0.0, device=device)
-        if len(X_small) == 3:
-            X_small = torch.stack(X_small, 0)  # (3,N,3)
-            loss_jerk = ((X_small[2] - 2 * X_small[1] + X_small[0]) ** 2).mean()
-
         # small latent magnitude regularizer
         loss_lat = zs.pow(2).mean() * 1e-4
 
-        loss = loss_rec + 1e-3 * loss_jerk + loss_lat
+        loss = loss_rec + loss_lat
         opt.zero_grad(set_to_none=True)
         loss.backward()
         
