@@ -394,10 +394,10 @@ def train(
         if it % 200 == 0:
             model.eval()
             with torch.no_grad():
-                zs_render = model.rollout(T * 3, with_detach=True)
+                zs_render = model.rollout(T * 6, with_detach=True)
                 X_render = model.decode_frames_at_resolution(zs_render, out_H, out_W)
                 save_video(X_render, f"checkpoint_iter_{it:05d}.mp4", fps)
-                print(f"Saved checkpoint_iter_{it:05d}.mp4 (3x duration: {T*3} frames)")
+                print(f"Saved checkpoint_iter_{it:05d}.mp4 (6x duration: {T*6} frames)")
             model.train()
 
     return model, fps, T, out_H, out_W
