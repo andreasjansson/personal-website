@@ -334,10 +334,11 @@ def train(
         loss.backward()
         opt.step()
 
-        if it % 100 == 0:
-            print(
-                f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f} jerk={loss_jerk.item():.6f}"
-            )
+        print(
+            f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f} jerk={loss_jerk.item():.6f}"
+        )
+
+        if it % 20 == 0:
             model.eval()
             with torch.no_grad():
                 zs_render = model.rollout(T, with_detach=True)
