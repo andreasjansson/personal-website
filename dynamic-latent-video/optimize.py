@@ -157,14 +157,23 @@ class PortHamiltonianDynamics(nn.Module):
         )
 
     def forward(self, z):
-        z = z.requires_grad_(True)
+        if self.training:
+            z = z.requires_grad_(True)
 
-        # energies
-        H = F.softplus(self.Hnet(z)).squeeze(-1)
-        D = F.softplus(self.Dnet(z)).squeeze(-1)
+            # energies
+            H = F.softplus(self.Hnet(z)).squeeze(-1)
+            D = F.softplus(self.Dnet(z)).squeeze(-1)
 
-        gH = torch.autograd.grad(H.sum(), z, create_graph=True)[0]  # ∇H
-        gD = torch.autograd.grad(D.sum(), z, create_graph=True)[0]  # ∇D
+            gH = torch.autograd.grad(H.sum(), z, create_graph=True)[0]  # ∇H
+            gD = torch.autograd.grad(D.sum(), z, create_graph=True)[0]  # ∇D
+        else:
+            with torch.enable_grad():
+                z_temp = z.requires_grad_(True)
+                H = F.softplus(self.Hnet(z_temp)).squeeze(-1)
+                D = F.softplus(self.Dnet(z_temp)).squeeze(-1)
+                gH = torch.autograd.grad(H.sum(), z_temp, create_graph=False)[0]
+                gD = torch.autograd.grad(D.sum(), z_temp, create_graph=False)[0]
+            z = z_temp.detach()
 
         dim = z.shape[-1]
         Jflat = self.Jgen(z)  # (B, dim*dim)
