@@ -230,6 +230,18 @@ class LatentVideo(nn.Module):
             X.append(torch.cat(rgb, 0).reshape(H, W, 3))
         return torch.stack(X, 0)  # (T,H,W,3)
 
+    def decode_frames_at_resolution(self, zs, H, W, chunk=65536):
+        T, D = zs.shape
+        coords = make_grid(H, W, zs.device)
+        X = []
+        for t in range(T):
+            rgb = []
+            for s in range(0, H * W, chunk):
+                e = min(s + chunk, H * W)
+                rgb.append(self.g(coords[s:e], zs[t].unsqueeze(0)))
+            X.append(torch.cat(rgb, 0).reshape(H, W, 3))
+        return torch.stack(X, 0)  # (T,H,W,3)
+
 
 # ----------------------------
 # Loss helpers
