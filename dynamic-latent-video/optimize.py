@@ -287,7 +287,13 @@ def train(
     Y, fps = load_video(mp4_path, resize_width=resize_width)
     T, H, W, _ = Y.shape
     Y = Y.to(device)
-    model = LatentVideo(H, W, dim_z=latent_dim).to(device)
+    model = LatentVideo(
+        H, W, 
+        dim_z=latent_dim, 
+        decoder_hidden=decoder_hidden, 
+        decoder_layers=decoder_layers,
+        dynamics_hidden=dynamics_hidden
+    ).to(device)
 
     # Calculate output resolution with aspect ratio handling
     if output_width is None and output_height is None:
