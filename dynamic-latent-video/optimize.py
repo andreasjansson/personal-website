@@ -273,6 +273,9 @@ def train(
     device="mps",
     output_width=None,
     output_height=None,
+    decoder_hidden=128,
+    decoder_layers=5,
+    dynamics_hidden=128,
 ):
     if device == "cuda":
         device = torch.device(device if torch.cuda.is_available() else "cpu")
