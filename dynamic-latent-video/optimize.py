@@ -330,11 +330,31 @@ def train(
         loss = loss_rec + 1e-3 * loss_jerk + loss_lat
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        
+        if it % 20 == 0:
+            # Collect gradient statistics
+            grad_stats = {}
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    component = name.split('.')[0]  # f, g, or z0
+                    if component not in grad_stats:
+                        grad_stats[component] = []
+                    grad_stats[component].append(param.grad.abs().mean().item())
+            
+            print(
+                f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f} jerk={loss_jerk.item():.6f}"
+            )
+            print(f"        Gradient stats:")
+            for comp in ['z0', 'f', 'g']:
+                if comp in grad_stats:
+                    grads = grad_stats[comp]
+                    print(f"          {comp}: mean={sum(grads)/len(grads):.6e}, max={max(grads):.6e}, min={min(grads):.6e}")
+        else:
+            print(
+                f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f} jerk={loss_jerk.item():.6f}"
+            )
+        
         opt.step()
-
-        print(
-            f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f} jerk={loss_jerk.item():.6f}"
-        )
 
         if it % 20 == 0:
             model.eval()
