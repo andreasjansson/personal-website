@@ -328,12 +328,12 @@ def train(
 
     for it in range(1, iters + 1):
         model.train()
-        # Roll out a bit beyond training so X[t+2n] exists
-        T_need = min(T + 2 * offset_n, T + 2 * offset_n)
+        # Roll out beyond training so X[t+2n] exists
+        T_need = T + 2 * offset_n
         zs = model.rollout(T_need)  # (T_need, D)
 
-        # sample times ensuring t+2n < T_need and t < T
-        t = torch.randint(0, T - 2 * offset_n, (1,), device=device).item()
+        # sample times ensuring t < T and t+2n < T_need
+        t = torch.randint(0, T, (1,), device=device).item()
         idx = torch.randint(0, HW, (pixels_per_step,), device=device)
 
         # decode only needed frames and pixels
