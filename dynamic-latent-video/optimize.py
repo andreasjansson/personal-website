@@ -278,12 +278,12 @@ def render_model(model, fps, T_train, T_extra=120, out_path="reconstruction.mp4"
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--video", required=True)
+    p.add_argument("--video", default="input.mp4")
     p.add_argument("--iters", type=int, default=6000)
     p.add_argument("--latent_dim", type=int, default=64)
     p.add_argument("--offset_n", type=int, default=8)
     p.add_argument("--resize_width", type=int, default=320)
-    p.add_argument("--device", default="cuda")
+    p.add_argument("--device", default="mps")
     args = p.parse_args()
 
     model, fps, T = train(args.video, iters=args.iters, resize_width=args.resize_width,
