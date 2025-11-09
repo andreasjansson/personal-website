@@ -349,6 +349,8 @@ def train(
                 if comp in grad_stats:
                     grads = grad_stats[comp]
                     print(f"          {comp}: mean={sum(grads)/len(grads):.6e}, max={max(grads):.6e}, min={min(grads):.6e}")
+            print(f"        z0 vector: mean={model.z0.data.mean().item():.6f}, std={model.z0.data.std().item():.6f}, "
+                  f"max={model.z0.data.max().item():.6f}, min={model.z0.data.min().item():.6f}")
         else:
             print(
                 f"[{it:05d}] total={loss.item():.6f} rec={loss_rec.item():.6f} jerk={loss_jerk.item():.6f}"
