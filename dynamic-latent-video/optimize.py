@@ -153,9 +153,9 @@ class LatentVideo(nn.Module):
 
     def rollout(self, T, with_detach=False):
         zs = []
-        z = self.z0
+        z = self.z0.unsqueeze(0)  # add batch dim
         for _ in range(T):
-            zs.append(z)
+            zs.append(z.squeeze(0))
             z = self.f(z)
             if with_detach: z = z.detach()
         return torch.stack(zs, 0)  # (T,D)
