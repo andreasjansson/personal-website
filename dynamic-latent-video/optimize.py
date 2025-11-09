@@ -254,11 +254,6 @@ def frame_mse(a, b):
     return ((a - b) ** 2).mean()
 
 
-def jerk_penalty(frames):
-    # L2 on second finite difference across time to reduce jitter
-    return ((frames[2:] - 2 * frames[1:-1] + frames[:-2]) ** 2).mean()
-
-
 # ----------------------------
 # Training loop
 # ----------------------------
