@@ -433,19 +433,44 @@ def render_model(model, fps, T_train, T_extra=120, out_path="reconstruction.mp4"
 if __name__ == "__main__":
     import argparse
 
-    p = argparse.ArgumentParser()
-    p.add_argument("--video", default="input.mp4")
-    p.add_argument("--iters", type=int, default=6000)
-    p.add_argument("--latent_dim", type=int, default=64)
-    p.add_argument("--offset_n", type=int, default=8)
-    p.add_argument("--resize_width", type=int, default=80)
-    p.add_argument("--output-width", type=int, default=None)
-    p.add_argument("--output-height", type=int, default=None)
-    p.add_argument("--decoder-hidden", type=int, default=128)
-    p.add_argument("--decoder-layers", type=int, default=5)
-    p.add_argument("--dynamics-hidden", type=int, default=128)
-    p.add_argument("--lr", type=float, default=2e-3)
-    p.add_argument("--device", default="mps")
+    p = argparse.ArgumentParser(
+        description="Train a latent video model with port-Hamiltonian dynamics and SIREN decoder"
+    )
+    
+    # Input/Output
+    p.add_argument("--video", default="input.mp4",
+                   help="Path to input video file (default: input.mp4)")
+    p.add_argument("--resize_width", type=int, default=80,
+                   help="Width to resize input video for training. Height is computed to maintain aspect ratio (default: 80)")
+    p.add_argument("--output-width", type=int, default=None,
+                   help="Width of output video. If not specified, uses training resolution. SIREN can render at any resolution (default: None)")
+    p.add_argument("--output-height", type=int, default=None,
+                   help="Height of output video. If only width specified, height computed to maintain aspect ratio (default: None)")
+    
+    # Training
+    p.add_argument("--iters", type=int, default=6000,
+                   help="Number of training iterations (default: 6000)")
+    p.add_argument("--lr", type=float, default=2e-3,
+                   help="Learning rate for Adam optimizer (default: 0.002)")
+    p.add_argument("--offset_n", type=int, default=8,
+                   help="Frame offset for stability loss: match X[t] and X[t+2n] to same target Y[t] (default: 8)")
+    p.add_argument("--device", default="mps",
+                   help="Device to train on: 'mps', 'cuda', or 'cpu' (default: mps)")
+    
+    # Architecture - Latent space
+    p.add_argument("--latent_dim", type=int, default=64,
+                   help="Dimension of latent vector Z (default: 64)")
+    
+    # Architecture - Decoder (g: Z -> X)
+    p.add_argument("--decoder-hidden", type=int, default=128,
+                   help="Hidden size for SIREN decoder network g (default: 128)")
+    p.add_argument("--decoder-layers", type=int, default=5,
+                   help="Number of layers in SIREN decoder network g (default: 5)")
+    
+    # Architecture - Dynamics (f: Z -> Z)
+    p.add_argument("--dynamics-hidden", type=int, default=128,
+                   help="Hidden size for port-Hamiltonian dynamics network f (default: 128)")
+    
     args = p.parse_args()
 
     model, fps, T, out_H, out_W = train(
