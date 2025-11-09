@@ -188,7 +188,7 @@ def jerk_penalty(frames):
 # ----------------------------
 # Training loop
 # ----------------------------
-def train(mp4_path, iters=4000, resize_width=320, latent_dim=64,
+def train(mp4_path, iters=4000, resize_width=80, latent_dim=64,
           offset_n=8, pixels_per_step=8192, lr=2e-3, device='mps'):
     if device == 'cuda':
         device = torch.device(device if torch.cuda.is_available() else 'cpu')
