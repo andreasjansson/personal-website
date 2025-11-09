@@ -397,7 +397,7 @@ def train(
                 print(f"Saved checkpoint_iter_{it:05d}.mp4")
             model.train()
 
-    return model, fps, T
+    return model, fps, T, out_H, out_W
 
 
 # ----------------------------
