@@ -198,10 +198,10 @@ class PortHamiltonianDynamics(nn.Module):
 # Wrapper (learn z0, f, g)
 # ----------------------------
 class LatentVideo(nn.Module):
-    def __init__(self, H, W, dim_z=64):
+    def __init__(self, H, W, dim_z=64, decoder_hidden=128, decoder_layers=5, dynamics_hidden=128):
         super().__init__()
-        self.f = PortHamiltonianDynamics(dim=dim_z)
-        self.g = SIRENDecoder(dim_z=dim_z)
+        self.f = PortHamiltonianDynamics(dim=dim_z, hidden=dynamics_hidden)
+        self.g = SIRENDecoder(dim_z=dim_z, hidden=decoder_hidden, layers=decoder_layers)
         self.z0 = nn.Parameter(torch.zeros(dim_z))
         self.H, self.W = H, W
         self.coords = None
